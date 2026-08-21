@@ -6,6 +6,7 @@ import { createSseResponse, collectNonStreaming } from './sse.js';
 import { UsageTracker } from './usage.js';
 import { CodeBuddyAdapter } from './adapters/codebuddy.js';
 import { TraeCnAdapter } from './adapters/traecn.js';
+import { TraeWorkAdapter } from './adapters/traework.js';
 import { QoderAdapter } from './adapters/qoder.js';
 
 function sendJson(res, status, body) {
@@ -24,6 +25,7 @@ export function registerAdapters(registry, config) {
   const instances = [];
   if (config.adapters.codebuddy) instances.push(new CodeBuddyAdapter());
   if (config.adapters.traecn) instances.push(new TraeCnAdapter());
+  if (config.adapters.traework) instances.push(new TraeWorkAdapter());
   if (config.adapters.qoder) instances.push(new QoderAdapter());
   for (const ad of instances) registry.register(ad);
   return instances;

@@ -40,7 +40,7 @@ ls
 ```bash
 # 无需安装任何第三方包
 npm test   # 可选，跑单元测试（不依赖平台登录凭据，任意环境可跑通）
-# → # tests 26 / 26 passed（或类似通过提示）
+# → # tests 33 / 33 passed（或类似通过提示）
 ```
 
 ## 4. 启动服务
@@ -78,13 +78,14 @@ curl -s http://127.0.0.1:8787/v1/models
 |------|---------|
 | CodeBuddy / WorkBuddy | 无需配置，在 WorkBuddy 桌面端登录即可；适配器自动读取 `CodeBuddyExtension/Data/Public/auth/*.info` |
 | Trae CN | 无需配置，在 Trae CN IDE 登录即可；适配器自动解密 `%APPDATA%/Trae CN/User/globalStorage/storage.json` 中的 `iCubeAuthInfo` |
+| TraeWork（桌面版） | 无需配置，在 TraeWork 桌面端登录即可；适配器自动解密 `%APPDATA%/TRAE SOLO CN/User/globalStorage/storage.json` 中的 `iCubeAuthInfo`（与 Trae CN 同一套 tc 算法，chat 走 `solo_work_lite`） |
 | Qoder | 二选一：① `qoderclicn login` 完成 OAuth（落盘 `~/.qoderworkcn/.auth-cn/user`）；② 设置环境变量 `QODERCN_PERSONAL_ACCESS_TOKEN=<PAT>` |
 
 查看各平台就绪状态：
 
 ```bash
 curl -s http://127.0.0.1:8787/status
-# → {"adapters":[{"id":"codebuddy","ready":true/false,...},{"id":"traecn",...},{"id":"qoder",...}]}
+# → {"adapters":[{"id":"codebuddy","ready":true/false,...},{"id":"traecn",...},{"id":"traework",...},{"id":"qoder",...}]}
 # ready:true 表示该平台本机凭据就绪
 ```
 
@@ -152,7 +153,7 @@ curl -s http://127.0.0.1:8787/usage
 | `PROXY_HUB_PORT` | `8787` | 监听端口 |
 | `PROXY_HUB_KEY` | 空 | 客户端需带 `Authorization: Bearer <key>` |
 | `PROXY_HUB_TIMEOUT` | `120000` | 上游超时（ms） |
-| `PROXY_ADAPTER_CODEBUDDY` / `TRAECN` / `QODER` | `true` | 是否启用对应适配器 |
+| `PROXY_ADAPTER_CODEBUDDY` / `TRAECN` / `TRAEWORK` / `QODER` | `true` | 是否启用对应适配器 |
 | `QODERCN_CLI` | `qoderclicn` | Qoder CLI 命令名 |
 | `QODERCN_PERSONAL_ACCESS_TOKEN` | 空 | Qoder PAT（未用 CLI 登录时） |
 
@@ -162,7 +163,7 @@ curl -s http://127.0.0.1:8787/usage
 
 | 症状 | 检查点 / 处理 |
 |------|--------------|
-| `GET /status` 某平台 `ready:false` | 确认该平台本机已登录；Qoder 需 `qoderclicn login` 或设 PAT |
+| `GET /status` 某平台 `ready:false` | 确认该平台本机已登录；Qoder 需 `qoderclicn login` 或设 PAT；traecn/traework 需在本机对应桌面端登录过 |
 | 对话返回 401 `Adapter xxx auth failed` | 平台凭据缺失/过期，重新登录对应客户端 |
 | 对话返回 404 `Unknown model` | 模型 ID 格式错误，用 `GET /v1/models` 查看可用 ID |
 | 对话返回 502 `Upstream failed` | 上游超时或网络异常，结合 `PROXY_HUB_TIMEOUT` 与日志排查 |

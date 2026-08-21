@@ -24,6 +24,7 @@ node index.js
 |------|-------------|-----------|
 | CodeBuddy / WorkBuddy | `codebuddy-` | 本机登录 WorkBuddy 桌面端（自动读凭据） |
 | Trae 国内版（CN） | `traecn-` | 本机登录 Trae CN IDE（自动 tc 解密凭据） |
+| TraeWork（桌面版） | `traework-` | 本机登录 TraeWork 桌面端（自动读 %APPDATA%\TRAE SOLO CN） |
 | Qoder（CN） | `qoder-` | `qoderclicn login` 一次登录，或设置 `QODERCN_PERSONAL_ACCESS_TOKEN` |
 
 模型 ID 使用连字符（不含斜杠），格式 `{平台}-{模型}`，例如：
@@ -31,6 +32,7 @@ node index.js
 ```
 codebuddy-deepseek-v4-pro
 traecn-glm-5.2
+traework-glm-5.2
 qoder-qwen3.7-max
 ```
 
@@ -55,7 +57,7 @@ qoder-qwen3.7-max
 | `PROXY_HUB_PORT` | `8787` | 监听端口 |
 | `PROXY_HUB_KEY` | 空 | 若设置，客户端需带 `Authorization: Bearer <key>` |
 | `PROXY_HUB_TIMEOUT` | `120000` | 上游超时（ms） |
-| `PROXY_ADAPTER_CODEBUDDY` / `TRAECN` / `QODER` | `true` | 是否启用对应适配器 |
+| `PROXY_ADAPTER_CODEBUDDY` / `TRAECN` / `TRAEWORK` / `QODER` | `true` | 是否启用对应适配器 |
 | `QODERCN_CLI` | `qoderclicn` | Qoder CLI 命令名 |
 | `QODERCN_PERSONAL_ACCESS_TOKEN` | 空 | Qoder PAT（未用 CLI 登录时） |
 
@@ -63,6 +65,7 @@ qoder-qwen3.7-max
 
 - **CodeBuddy / WorkBuddy**：无需配置。在 WorkBuddy 桌面端登录即可，凭据从 `CodeBuddyExtension/Data/Public/auth/*.info` 自动读取，token 由桌面端自动刷新。
 - **Trae CN**：无需配置。在 Trae CN IDE 登录即可，适配器自动解密 `%APPDATA%/Trae CN/User/globalStorage/storage.json` 中的 `iCubeAuthInfo`。
+- **TraeWork（桌面版）**：无需配置。在 TraeWork 桌面端登录即可，适配器自动解密 `%APPDATA%/TRAE SOLO CN/User/globalStorage/storage.json` 中的 `iCubeAuthInfo`（与 Trae CN 同一套 tc 算法；chat 走 `solo_work_lite` 轻排队）。
 - **Qoder**：二选一。① 终端执行 `qoderclicn login` 完成 OAuth 登录（落盘到 `~/.qoderworkcn/.auth-cn/user`）；② 或设置环境变量 `QODERCN_PERSONAL_ACCESS_TOKEN=<PAT>`。
 
 可用 `GET /status` 查看每个平台是否就绪、缺失原因。

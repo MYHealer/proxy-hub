@@ -17,7 +17,7 @@ const DEFAULTS = {
   port: 8787,
   proxyKey: '',
   timeoutMs: 120000,
-  adapters: { codebuddy: true, traecn: true, qoder: true },
+  adapters: { codebuddy: true, traecn: true, traework: true, qoder: true },
   upstreamOverrides: {},
 };
 
@@ -38,6 +38,7 @@ export function loadConfig() {
     adapters: {
       codebuddy: bool(env.PROXY_ADAPTER_CODEBUDDY, file.adapters?.codebuddy ?? DEFAULTS.adapters.codebuddy),
       traecn: bool(env.PROXY_ADAPTER_TRAECN, file.adapters?.traecn ?? DEFAULTS.adapters.traecn),
+      traework: bool(env.PROXY_ADAPTER_TRAEWORK, file.adapters?.traework ?? DEFAULTS.adapters.traework),
       qoder: bool(env.PROXY_ADAPTER_QODER, file.adapters?.qoder ?? DEFAULTS.adapters.qoder),
     },
     upstreamOverrides: file.upstreamOverrides ?? DEFAULTS.upstreamOverrides,

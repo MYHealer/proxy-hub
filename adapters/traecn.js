@@ -47,6 +47,11 @@ function storagePath() {
   return path.join(os.homedir(), 'AppData', 'Roaming', 'Trae CN', 'User', 'globalStorage', 'storage.json');
 }
 
+/** Trae 桌面版 storage.json 路径（productDir 形如 'Trae CN' / 'TRAE SOLO CN' / 'Trae'）。 */
+export function traeStoragePath(productDir) {
+  return path.join(os.homedir(), 'AppData', 'Roaming', productDir, 'User', 'globalStorage', 'storage.json');
+}
+
 function xorSalts(a, b, len) {
   const out = Buffer.alloc(len);
   for (let i = 0; i < len; i++) out[i] = a[i] ^ b[i];
@@ -72,7 +77,7 @@ export function normalizeTraeEvent(event, data, model) {
 }
 
 /** tc AES-128-CBC + SHA-512 完整性 解密 Trae 的单个加密值 */
-function decryptTc(base64Value) {
+export function decryptTc(base64Value) {
   const buf = Buffer.from(base64Value, 'base64');
   const header = buf.subarray(0, 6);
   const randomBytes = buf.subarray(6, 38);
