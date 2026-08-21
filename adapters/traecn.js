@@ -47,6 +47,14 @@ function storagePath() {
   return path.join(os.homedir(), 'AppData', 'Roaming', 'Trae CN', 'User', 'globalStorage', 'storage.json');
 }
 
+/** 调试开关：环境变量 PROXY_HUB_DEBUG 为 "1"/"true"/"traecn" 时开启；默认关闭，零日志开销。 */
+function debugEnabled() {
+  const v = process.env.PROXY_HUB_DEBUG;
+  if (v === undefined) return false;
+  const s = String(v).toLowerCase();
+  return s === '1' || s === 'true' || s === 'traecn';
+}
+
 /** Trae 桌面版 storage.json 路径（productDir 形如 'Trae CN' / 'TRAE SOLO CN' / 'Trae'）。 */
 export function traeStoragePath(productDir) {
   return path.join(os.homedir(), 'AppData', 'Roaming', productDir, 'User', 'globalStorage', 'storage.json');
@@ -122,15 +130,21 @@ function postJsonBuffer(url, headers, body, timeoutMs) {
   });
 }
 
-function parseTraeSse(res, model, emit) {
+function parseTraeSse(res, model, emit, log) {
   if (res.status >= 400) throw new Error(`Trae CN upstream ${res.status}: ${res.body.slice(0, 200)}`);
   let currentEvent = '';
   for (const raw of res.body.split('\n')) {
     const line = raw.trim();
-    if (line.startsWith('event:')) { currentEvent = line.slice(6).trim(); continue; }
+    if (line.startsWith('event:')) { currentEvent = line.slice(6).trim(); log?.(`sse.event`, currentEvent); continue; }
     if (line.startsWith('data:')) {
       const data = line.slice(5).trim();
-      for (const chunk of normalizeTraeEvent(currentEvent, data, model)) emit(chunk);
+      log?.(`sse.data`, `${currentEvent} | ${data.slice(0, 300)}`);
+      const chunks = normalizeTraeEvent(currentEvent, data, model);
+      if (chunks.length === 0 && currentEvent && currentEvent !== 'done') {
+        // 未识别事件被丢弃——工具事件通常就藏在这里
+        log?.(`sse.dropped`, `${currentEvent} | ${data.slice(0, 300)}`);
+      }
+      for (const chunk of chunks) emit(chunk);
     }
   }
 }
@@ -141,6 +155,11 @@ export class TraeCnAdapter {
     this.upstream = options.upstream || UPSTREAM_BASE_CN;
     this.timeoutMs = options.timeoutMs || 120000;
     this.cache = new CredentialsCache();
+    this.debug = options.debug !== undefined ? options.debug : debugEnabled();
+  }
+
+  log(label, ...args) {
+    if (this.debug) console.error(`[traecn][${label}]`, ...args);
   }
 
   async getAuth() {
@@ -190,13 +209,27 @@ export class TraeCnAdapter {
     };
     if (reqBody.max_tokens) body.max_tokens = reqBody.max_tokens;
 
+    // 诊断：入站是否带工具定义/工具调用记录？出站消息结构如何？function 是否该切换？
+    const msgs = reqBody.messages || [];
+    this.log('inbound', JSON.stringify({
+      model: reqBody.model,
+      hasTools: Array.isArray(reqBody.tools) && reqBody.tools.length > 0,
+      toolsCount: reqBody.tools?.length ?? 0,
+      toolChoice: reqBody.tool_choice,
+      roles: msgs.map((m) => m.role),
+      hasToolCalls: msgs.some((m) => Array.isArray(m.tool_calls) && m.tool_calls.length > 0),
+    }));
+    this.log('outbound', JSON.stringify({ function: body.function, messages: body.messages, stream: body.stream }));
+
     let lastErr = null;
     for (const ep of CHAT_ENDPOINTS) {
       try {
+        this.log('upstream', `-> ${ep}`);
         const res = await postJsonBuffer(`${this.upstream}${ep}`, headers, body, this.timeoutMs);
-        parseTraeSse(res, reqBody.model, emit);
+        this.log('upstream', `<- ${ep} status ${res.status}`);
+        parseTraeSse(res, reqBody.model, emit, this.log.bind(this));
         return;
-      } catch (e) { lastErr = e; }
+      } catch (e) { this.log('upstream', `!! ${ep} ${e.message}`); lastErr = e; }
     }
     throw lastErr || new Error('Trae CN 所有上游端点均失败');
   }
