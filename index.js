@@ -59,6 +59,13 @@ export function buildHandler({ config, registry, usage, adapters }) {
     if (req.method === 'GET' && pathname === '/v1/models') {
       return sendJson(res, 200, { object: 'list', data: registry.listModels() });
     }
+    if (req.method === 'GET' && pathname === '/v1/models/matrix') {
+      return sendJson(res, 200, {
+        families: registry.modelMatrix(),
+        pricingNote:
+          '各平台采用订阅/积分计费，无公开单 token 单价；本接口仅提供模型能力对比。',
+      });
+    }
     if (req.method === 'GET' && pathname === '/usage') {
       return sendJson(res, 200, usage ? usage.summary() : { message: 'usage tracking disabled' });
     }

@@ -40,7 +40,7 @@ ls
 ```bash
 # 无需安装任何第三方包
 npm test   # 可选，跑单元测试（不依赖平台登录凭据，任意环境可跑通）
-# → # tests 33 / 33 passed（或类似通过提示）
+# → # tests 38 / 38 passed（或类似通过提示）
 ```
 
 ## 4. 启动服务
@@ -68,6 +68,10 @@ curl -s http://127.0.0.1:8787/health
 
 curl -s http://127.0.0.1:8787/v1/models
 # → {"object":"list","data":[...]}  列出各平台可用模型
+
+curl -s http://127.0.0.1:8787/v1/models/matrix
+# → {"families":{"glm":{"models":[...],"providers":{"codebuddy":[...],...}},...}}
+#    跨平台模型能力对比（按模型家族归并）
 ```
 
 ## 6. 配置平台账号（按需启用）
@@ -78,7 +82,7 @@ curl -s http://127.0.0.1:8787/v1/models
 |------|---------|
 | CodeBuddy / WorkBuddy | 无需配置，在 WorkBuddy 桌面端登录即可；适配器自动读取 `CodeBuddyExtension/Data/Public/auth/*.info` |
 | Trae CN | 无需配置，在 Trae CN IDE 登录即可；适配器自动解密 `%APPDATA%/Trae CN/User/globalStorage/storage.json` 中的 `iCubeAuthInfo` |
-| TraeWork（桌面版） | 无需配置，在 TraeWork 桌面端登录即可；适配器自动解密 `%APPDATA%/TRAE SOLO CN/User/globalStorage/storage.json` 中的 `iCubeAuthInfo`（与 Trae CN 同一套 tc 算法，chat 走 `solo_work_lite`） |
+| TraeWork（桌面版） | 无需配置，在 TraeWork 桌面端登录即可；适配器自动解密 `%APPDATA%/TRAE SOLO CN/User/globalStorage/storage.json` 中的 `iCubeAuthInfo`（与 Trae CN 同一套 tc 算法，chat 走 `solo_work_lite`），token 过期或上游 401 时用 `refreshToken` 调 ExchangeToken 自动换新 |
 | Qoder | 二选一：① `qoderclicn login` 完成 OAuth（落盘 `~/.qoderworkcn/.auth-cn/user`）；② 设置环境变量 `QODERCN_PERSONAL_ACCESS_TOKEN=<PAT>` |
 
 查看各平台就绪状态：
@@ -116,6 +120,7 @@ curl -s -H "Authorization: Bearer your-secret" http://127.0.0.1:8787/v1/models
 ```
 codebuddy-deepseek-v4-pro
 traecn-glm-5.2
+traework-glm-5.2
 qoder-qwen3.7-max
 ```
 
@@ -143,6 +148,8 @@ curl -sN http://127.0.0.1:8787/v1/chat/completions \
 curl -s http://127.0.0.1:8787/usage
 # → {"byAdapter":{...},"byDay":[...]}  按平台/模型/日期累计请求数与 token
 ```
+
+> token 精度取决于上游：CodeBuddy 上游返回真实 `usage`；Trae CN / TraeWork 不返回，所以由网关按字符长度估算（chars/4）。跨平台 token 只供参考，不精确可比。
 
 ## 10. 配置项速查
 

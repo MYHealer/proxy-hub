@@ -28,4 +28,41 @@ export class Registry {
       owned_by: this.external.get(id).adapterId,
     }));
   }
+
+  /** 跨平台模型能力矩阵：按模型家族分组，展示各适配器是否提供该家族及其模型。 */
+  modelMatrix() {
+    const families = new Map(); // family -> { models:Set, providers: Map<adapterId, models[]> }
+    for (const adapterId of this.adapters.keys()) {
+      for (const { upstreamId } of this._modelsOf(adapterId)) {
+        const family = familyOf(upstreamId);
+        let f = families.get(family);
+        if (!f) { f = { models: new Set(), providers: new Map() }; families.set(family, f); }
+        f.models.add(upstreamId);
+        const list = f.providers.get(adapterId) || [];
+        list.push(upstreamId);
+        f.providers.set(adapterId, list);
+      }
+    }
+    const out = {};
+    for (const [family, f] of [...families].sort((a, b) => a[0].localeCompare(b[0]))) {
+      out[family] = {
+        models: [...f.models],
+        providers: Object.fromEntries([...f.providers].map(([id, models]) => [id, models])),
+      };
+    }
+    return out;
+  }
+
+  _modelsOf(adapterId) {
+    const adapter = this.adapters.get(adapterId);
+    if (!adapter || typeof adapter.registerModels !== 'function') return [];
+    return adapter.registerModels();
+  }
+}
+
+/** 从模型名推导家族：取连字符首段并转小写（glm-5.2→glm、GLM-5.2→glm、Qwen3.6-Plus→qwen3.6）。 */
+export function familyOf(upstreamId) {
+  const idx = String(upstreamId).indexOf('-');
+  const head = idx > 0 ? String(upstreamId).slice(0, idx) : String(upstreamId);
+  return head.toLowerCase();
 }

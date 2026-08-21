@@ -6,6 +6,7 @@ import path from 'node:path';
 import { Registry } from '../registry.js';
 import { normalizeTraeEvent, traeStoragePath, decryptTc } from '../adapters/traecn.js';
 import { TraeWorkAdapter, SOLO_CLIENT_ID, CHAT_FUNCTION, MODELS } from '../adapters/traework.js';
+import { AUTH_KEY } from '../adapters/traework.js';
 
 test('traework registerModels uses traework- prefix without slash', () => {
   const ad = new TraeWorkAdapter();
@@ -56,4 +57,18 @@ test('traework missing credential file fails fast with clear error', async () =>
 test('traework decryptTc is the shared tc algorithm (throws on garbage)', () => {
   // 非法/未加密内容必须在解密阶段抛错（Fail Fast），绝不静默放行
   assert.throws(() => decryptTc(Buffer.from('not-a-valid-tc-blob').toString('base64')));
+});
+
+test('traework refreshAuth without refreshToken falls back to disk reload', async () => {
+  const tmp = path.join(os.tmpdir(), `proxy-hub-traework-rf-${Date.now()}`);
+  fs.mkdirSync(tmp, { recursive: true });
+  const storageFile = path.join(tmp, 'storage.json');
+  // 明文 auth、无 refreshToken -> refreshAuth 应回退重读磁盘，而非走 ExchangeToken 网络
+  fs.writeFileSync(storageFile, JSON.stringify({ [AUTH_KEY]: JSON.stringify({ token: 'disk-token', userId: 'u1' }) }));
+  const ad = new TraeWorkAdapter({ storageFile });
+  const fresh = await ad.refreshAuth();
+  assert.equal(fresh.token, 'disk-token');
+  assert.equal(fresh.userId, 'u1');
+  assert.equal(ad.cache.has('auth'), true); // 重读结果已写回缓存
+  fs.rmSync(tmp, { recursive: true, force: true });
 });

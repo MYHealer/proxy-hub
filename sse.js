@@ -35,6 +35,13 @@ export async function collectNonStreaming(adapter, body) {
     if (choice?.finish_reason) finishReason = choice.finish_reason;
     if (c.usage) usage = c.usage;
   }
+  if (!usage) {
+    // 上游未返回 usage（如 traecn/traework 私有事件不携带）时，按字符数/4 估算
+    usage = {
+      prompt_tokens: estimatePromptTokens(body?.messages),
+      completion_tokens: Math.ceil(content.length / 4),
+    };
+  }
   return {
     id,
     object: 'chat.completion',
@@ -43,4 +50,15 @@ export async function collectNonStreaming(adapter, body) {
     choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: finishReason || 'stop' }],
     usage,
   };
+}
+
+/** 估算 prompt token：把消息数组序列化后按字符数/4 折算 */
+function estimatePromptTokens(messages) {
+  if (!Array.isArray(messages)) return 0;
+  let chars = 0;
+  for (const m of messages) {
+    const v = typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content ?? '');
+    chars += v.length;
+  }
+  return Math.ceil(chars / 4);
 }
