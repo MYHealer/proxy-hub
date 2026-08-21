@@ -30,7 +30,7 @@ cd proxy-hub
 
 ```bash
 ls
-# → adapters/  config.js  credentials.js  index.js  package.json  registry.js  sse.js  usage.js  test/  README.md
+# → adapters/  config.js  credentials.js  docs/  index.js  package.json  registry.js  sse.js  usage.js  test/  README.md
 ```
 
 ## 3. 安装依赖
@@ -93,7 +93,9 @@ curl -s http://127.0.0.1:8787/status
 默认无鉴权、仅本机可访问。若需暴露到局域网或公网，设置 `PROXY_HUB_KEY`：
 
 ```bash
-PROXY_HUB_KEY=your-secret node index.js
+PROXY_HUB_KEY=your-secret node index.js   # macOS / Linux (bash/sh)
+$env:PROXY_HUB_KEY="your-secret"; node index.js   # Windows PowerShell
+set PROXY_HUB_KEY=your-secret && node index.js     # Windows CMD
 ```
 
 客户端请求须带：

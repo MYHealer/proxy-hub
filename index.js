@@ -3,6 +3,7 @@ import http from 'node:http';
 import { loadConfig } from './config.js';
 import { Registry } from './registry.js';
 import { createSseResponse, collectNonStreaming } from './sse.js';
+import { UsageTracker } from './usage.js';
 import { CodeBuddyAdapter } from './adapters/codebuddy.js';
 import { TraeCnAdapter } from './adapters/traecn.js';
 import { QoderAdapter } from './adapters/qoder.js';
@@ -109,7 +110,8 @@ function handleChat(req, res, registry, config, usage) {
 export function main() {
   const config = loadConfig();
   const registry = new Registry();
-  const handler = buildHandler({ config, registry });
+  const usage = new UsageTracker();
+  const handler = buildHandler({ config, registry, usage });
   const server = http.createServer(handler);
   server.timeout = config.timeoutMs;
   server.listen(config.port, '127.0.0.1', () => {
