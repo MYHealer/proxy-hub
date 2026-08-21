@@ -1,0 +1,10 @@
+{
+  "name": "proxy-hub",
+  "version": "0.1.0",
+  "description": "Multi-platform AI reverse proxy hub (OpenAI compatible)",
+  "type": "module",
+  "private": true,
+  "bin": { "proxy-hub": "index.js" },
+  "scripts": { "start": "node index.js", "test": "node --test" },
+  "engines": { "node": ">=18" }
+}

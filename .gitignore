@@ -1,0 +1,11 @@
+# 可能含敏感配置（proxyKey 等）的本地配置，禁止提交
+config.json
+config.local.json
+
+# 用量统计落盘数据（含本地使用记录）
+data/
+
+# 依赖与系统文件
+node_modules/
+*.log
+.DS_Store
