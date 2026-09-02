@@ -309,6 +309,33 @@ export class TraeWorkAdapter {
     body.metadata = { is_remote_req: false };
     body.request_seq = 1;
     if (reqBody.max_tokens) body.max_tokens = reqBody.max_tokens;
+    // few-shot 注入：新会话 + 有工具时，注入工具调用示例帮助模型学会格式
+    if (reqBody.tools?.length > 0 && body.messages.length <= 4) {
+      const exampleToolCall = {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          index: 0,
+          id: 'call_example_001',
+          type: 'function',
+          function_call: {
+            name: 'Read',
+            arguments: '{"file_path": "/tmp/example.py"}'
+          }
+        }]
+      };
+      const exampleToolResponse = {
+        role: 'tool',
+        tool_call_id: 'call_example_001',
+        content: [{ type: 'text', text: 'print("hello world")' }]
+      };
+      // 在第一条用户消息后插入示例
+      const insertIdx = body.messages.findIndex(m => m.role === 'user');
+      if (insertIdx >= 0) {
+        body.messages.splice(insertIdx + 1, 0, exampleToolCall, exampleToolResponse);
+        try { fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log', `[${new Date().toISOString()}] INJECTED few-shot tool call example\n`); } catch {}
+      }
+    }
     // tools 处理：不支持原生 function calling 的模型走文本注入
     if (reqBody.tools?.length > 0 && needsTextTools(reqBody.model)) {
       const injected = injectTools({ ...reqBody, messages: body.messages });
