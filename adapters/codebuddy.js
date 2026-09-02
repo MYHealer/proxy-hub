@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import https from 'node:https';
+import { CredentialsCache } from '../credentials.js';
+import { postStreamingSSE } from '../sse.js';
 
 const UPSTREAM_BASE = 'https://copilot.tencent.com/v2';
 
@@ -33,56 +34,50 @@ const FIXED_HEADERS = {
 
 const MODELS = [
   'deepseek-v4-pro', 'deepseek-v4-flash', 'minimax-m3', 'minimax-m2.7',
-  'glm-5.2', 'glm-5.1', 'glm-5v-turbo', 'kimi-k3-1', 'kimi-k2.7',
-  'kimi-k2.6', 'hy3',
+  'glm-5.3', 'glm-5.3-flash', 'glm-5.2', 'glm-5.1', 'glm-5v-turbo',
+  'kimi-k3-1', 'kimi-k2.7', 'kimi-k2.6', 'hy4-preview', 'hy3',
 ];
 
-// 遍历凭据文件，返回 { token, uid }；全部缺失则抛错（Fail Fast）
-function readAuth() {
-  for (const file of AUTH_FILES) {
-    try {
-      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (data?.auth?.accessToken && data?.account?.uid) {
-        return { token: data.auth.accessToken, uid: String(data.account.uid) };
-      }
-    } catch {
-      // 文件不存在或解析失败，尝试下一个
-    }
+const RETRYABLE = new Set([429, 502, 503, 504]);
+const MAX_RETRIES = 2;
+
+function isRetryable(err) {
+  const m = err?.message || '';
+  if (m.includes('timeout') || m.includes('ECONNRESET') || m.includes('ETIMEDOUT')) return true;
+  for (const code of RETRYABLE) {
+    if (m.includes(`upstream ${code}`)) return true;
   }
-  throw new Error('未找到 CodeBuddy/WorkBuddy 登录凭据，请先登录 WorkBuddy 桌面端');
+  return false;
 }
 
-function postJson(url, headers, body, timeoutMs = 120000) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const req = https.request(
-      u,
-      { method: 'POST', headers: { ...headers, 'Content-Length': Buffer.byteLength(body) } },
-      (res) => {
-        const data = [];
-        res.on('data', (c) => data.push(c));
-        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(data).toString('utf8') }));
-      },
-    );
-    req.on('error', reject);
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('upstream timeout')));
-    req.write(body);
-    req.end();
-  });
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 export class CodeBuddyAdapter {
   constructor() {
     this.id = 'codebuddy';
+    this.cache = new CredentialsCache();
+    this.timeoutMs = 180000; // 3min — 复杂推理可能很慢
   }
 
   async getAuth() {
-    return readAuth();
+    return this.cache.get('auth', async () => {
+      for (const file of AUTH_FILES) {
+        try {
+          const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (data?.auth?.accessToken && data?.account?.uid) {
+            return { value: { token: data.auth.accessToken, uid: String(data.account.uid) }, expiresAt: Date.now() + 5 * 60 * 1000 };
+          }
+        } catch {
+          // 文件不存在或解析失败，尝试下一个
+        }
+      }
+      throw new Error('未找到 CodeBuddy/WorkBuddy 登录凭据，请先登录 WorkBuddy 桌面端');
+    });
   }
 
   async refreshAuth() {
-    // WorkBuddy 桌面端会自动刷新 token 文件，重新读取即可拿到最新 token
-    return readAuth();
+    this.cache.invalidate('auth');
+    return this.getAuth();
   }
 
   registerModels() {
@@ -98,18 +93,22 @@ export class CodeBuddyAdapter {
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
     };
-    const up = await postJson(`${UPSTREAM_BASE}/chat/completions`, headers, JSON.stringify(reqBody));
-    if (up.status >= 400) {
-      throw new Error(`CodeBuddy upstream ${up.status}: ${up.body.slice(0, 200)}`);
+    const bodyStr = JSON.stringify(reqBody);
+    let lastErr = null;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        // 重试前刷新凭据 + backoff
+        try { await this.refreshAuth(); const a = await this.getAuth(); headers.Authorization = `Bearer ${a.token}`; } catch {}
+        await sleep(1000 * attempt);
+      }
+      try {
+        await postStreamingSSE(`${UPSTREAM_BASE}/chat/completions`, headers, bodyStr, this.timeoutMs, emit);
+        return; // 成功
+      } catch (e) {
+        lastErr = e;
+        if (!isRetryable(e) || attempt >= MAX_RETRIES) break;
+      }
     }
-    // 上游为标准 OpenAI SSE：按 data: 行解析并 emit 为 chunk 对象
-    const lines = up.body.split('\n');
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t.startsWith('data:')) continue;
-      const payload = t.slice(5).trim();
-      if (payload === '[DONE]') continue;
-      try { emit(JSON.parse(payload)); } catch { /* 跳过无法解析的行 */ }
-    }
+    throw lastErr || new Error('CodeBuddy upstream failed');
   }
 }

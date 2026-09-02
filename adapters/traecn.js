@@ -2,8 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import https from 'node:https';
+
+const TOOL_CALL_LOG = 'C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log';
+function logToolCall(label, name, args) {
+  try { fs.appendFileSync(TOOL_CALL_LOG, `[${new Date().toISOString()}] ${label}: ${name} => ${(args || '').slice(0,600)}\n`); } catch {}
+}
+function logDebug(label, msg) {
+  try { fs.appendFileSync(TOOL_CALL_LOG, `[${new Date().toISOString()}] [DBG] ${label}: ${msg}\n`); } catch {}
+}
 import { CredentialsCache } from '../credentials.js';
+import { postStreamingTraeSSE } from '../sse.js';
+import { needsTextTools, injectTools } from '../tool-compat.js';
 
 const UPSTREAM_BASE_CN = 'https://trae-api-cn.mchost.guru';
 const CHAT_ENDPOINTS = [
@@ -15,7 +24,20 @@ const X_APP_ID = '6eefa01c-1036-4c7e-9ca5-d891f63bfcd8';
 const IDE_VERSION_CN = '3.3.67';
 const IDE_VERSION_CODE_CN = '20260401';
 
-const MODELS = ['glm-5.2', 'glm-5.1', 'glm-5', 'qwen-3.7-plus', 'kimi-k2.6', 'deepseek-v4-pro', 'deepseek-v4-flash'];
+const MODELS = ['glm-5.2', 'glm-5.1', 'glm-5', 'qwen-3.7-plus', 'kimi-k2.6', 'DeepSeek-V4-Pro', 'DeepSeek-V4-Flash'];
+
+// 上游模型名归一化表（小写 → 正确大小写）
+const MODEL_ALIASES = {
+  'deepseek-v4-flash': 'DeepSeek-V4-Flash',
+  'deepseek-v4-pro': 'DeepSeek-V4-Pro',
+  'deepseek-flash': 'DeepSeek-V4-Flash',
+  'deepseek-pro': 'DeepSeek-V4-Pro',
+};
+
+function normalizeModel(name) {
+  const lower = (name || '').toLowerCase();
+  return MODEL_ALIASES[lower] || name;
+}
 
 // Trae CN 前端 JS 逆向出的四组 64B 盐值（来源：laojichao/trae-local-api，原样拷贝，勿改）
 const SALT_A = Buffer.from([
@@ -71,17 +93,390 @@ export function normalizeTraeEvent(event, data, model) {
   const created = Math.floor(Date.now() / 1000);
   if (event === 'done') {
     let finish = 'stop';
-    try { finish = JSON.parse(data).finish_reason || 'stop'; } catch { /* 默认 stop */ }
+    try { finish = JSON.parse(data).finish_reason || 'stop'; } catch {}
     return [{ id: `chatcmpl-${crypto.randomUUID()}`, object: 'chat.completion.chunk', created, model,
       choices: [{ index: 0, delta: {}, finish_reason: finish }] }];
   }
-  if (event === 'output') {
-    let response = '';
-    try { response = JSON.parse(data).response || ''; } catch { /* 忽略无法解析的行 */ }
+  if (event === 'token_usage') {
+    let usage = null;
+    try { const d = JSON.parse(data); usage = { prompt_tokens: d.prompt_tokens, completion_tokens: d.completion_tokens }; } catch {}
+    if (!usage) return [];
     return [{ id: `chatcmpl-${crypto.randomUUID()}`, object: 'chat.completion.chunk', created, model,
-      choices: [{ index: 0, delta: { content: response }, finish_reason: null }] }];
+      choices: [{ index: 0, delta: {}, finish_reason: null }], usage }];
+  }
+  if (event === 'output') {
+    let parsed;
+    try { parsed = JSON.parse(data); } catch { return []; }
+    const delta = {};
+    // 文本内容：检测工具调用文本，转为结构化 tool_calls
+    if (parsed.response) {
+      const text = parsed.response;
+      let parsed_text_tc = false;
+      // DeepSeek 原始格式: <|FunctionCallBegin|>[{"name":"X","parameters":{...}}]<|FunctionCallEnd|>
+      const fcBegin = text.indexOf('<|FunctionCallBegin|>');
+      // 文本注入格式: <tool_call>{"name":"X","arguments":{...}}</tool_call>
+      const tcTagBegin = text.indexOf('<tool_call>');
+      if (fcBegin >= 0) {
+        const fcEnd = text.indexOf('<|FunctionCallEnd|>');
+        const jsonStart = fcBegin + '<|FunctionCallBegin|>'.length;
+        const jsonStr = fcEnd >= 0 ? text.substring(jsonStart, fcEnd) : text.substring(jsonStart);
+        try {
+          let calls = JSON.parse(jsonStr);
+          if (!Array.isArray(calls)) calls = [calls];
+          delta.tool_calls = calls.map((c, i) => ({
+            index: i,
+            id: `call_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`,
+            type: 'function',
+            function: {
+              name: c.name || c.function || '',
+              arguments: typeof c.parameters === 'object' ? JSON.stringify(c.parameters || {}) : (c.arguments || c.parameters || ''),
+            },
+          }));
+          parsed_text_tc = true;
+          logDebug('DEEPSEEK_TC', JSON.stringify(delta.tool_calls).slice(0, 400));
+        } catch {}
+        const before = text.substring(0, fcBegin).trim();
+        const after = fcEnd >= 0 ? text.substring(fcEnd + '<|FunctionCallEnd|>'.length).trim() : '';
+        const cleanText = (before + (after ? ' ' + after : '')).trim();
+        if (cleanText) delta.content = cleanText;
+      } else if (tcTagBegin >= 0) {
+        const tcTagEnd = text.indexOf('</tool_call>');
+        const jsonStart = tcTagBegin + '<tool_call>'.length;
+        const jsonStr = tcTagEnd >= 0 ? text.substring(jsonStart, tcTagEnd) : text.substring(jsonStart);
+        try {
+          let call = JSON.parse(jsonStr.trim());
+          delta.tool_calls = [{
+            index: 0,
+            id: `call_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`,
+            type: 'function',
+            function: {
+              name: call.name || '',
+              arguments: typeof call.arguments === 'object' ? JSON.stringify(call.arguments || {}) : (call.arguments || ''),
+            },
+          }];
+          parsed_text_tc = true;
+          logDebug('TEXT_TC', JSON.stringify(delta.tool_calls).slice(0, 400));
+        } catch {}
+        const before = text.substring(0, tcTagBegin).trim();
+        const after = tcTagEnd >= 0 ? text.substring(tcTagEnd + '</tool_call>'.length).trim() : '';
+        const cleanText = (before + (after ? ' ' + after : '')).trim();
+        if (cleanText) delta.content = cleanText;
+      } else {
+        delta.content = text;
+        // 记录纯文本输出（用于诊断模型是否正确使用工具）
+        if (text.length > 10) logDebug('TEXT_ONLY', text.slice(0, 200));
+      }
+    }
+    // 思考链
+    if (parsed.reasoning_content) delta.reasoning_content = parsed.reasoning_content;
+    // 工具调用：SOLO 用 function_call 字段 → 转成 OpenAI 的 function（优先级高于文本解析）
+    if (parsed.tool_calls && parsed.tool_calls !== 'null') {
+      let tc = parsed.tool_calls;
+      if (typeof tc === 'string') { try { tc = JSON.parse(tc); } catch { tc = null; } }
+      // 记录上游原始 tool_calls 用于诊断空参数问题
+      try { logToolCall('RAW_TC', String(tc?.[0]?.function_call?.name ?? tc?.[0]?.function?.name ?? '?'), JSON.stringify(tc)); } catch {}
+      if (tc) {
+        if (!Array.isArray(tc)) tc = [tc];
+        delta.tool_calls = tc.map(call => {
+          const fc = call.function_call || call.function;
+          if (!fc) return call;
+          // 清理 SOLO 专属字段（参考 cpa-multi-plugins solosse.go:395-398）
+          delete fc.namespace;
+          delete fc.partial_arguments;
+          // 确保 arguments 始终是合法 JSON 字符串（Trae 上游有时传空值）
+          let args = fc.arguments;
+          if (!args || args === 'null' || args === 'undefined') {
+            args = '';
+          } else if (typeof args === 'object') {
+            args = JSON.stringify(args);
+          }
+          // 清理 arguments 中的污染字段（模型偶尔混入 description/namespace 等元数据）
+          if (args && typeof args === 'string' && args.includes('"description"')) {
+            try {
+              const parsed = JSON.parse(args);
+              if (parsed && typeof parsed === 'object') {
+                let changed = false;
+                for (const key of ['description', 'namespace', 'partial_arguments', 'type', 'id']) {
+                  if (key in parsed && typeof parsed[key] === 'string') {
+                    delete parsed[key];
+                    changed = true;
+                  }
+                }
+                if (changed) args = JSON.stringify(parsed);
+              }
+            } catch {}
+          }
+          // index 必须保留：上游用它区分并行调用，丢失会把多个调用全并到 index 0
+          const out = {
+            index: call.index ?? 0,
+            id: call.id,
+            type: call.type || 'function',
+            function: { name: fc.name || '', arguments: args },
+          };
+          return out;
+        });
+        // 注意：此处不能过滤无 name 的块——上游后续分片只有 arguments 没有 name，
+        // 过滤掉会导致参数永远累积不完整。完整性校验交给 TraeEventNormalizer 在流末统一做。
+        if (delta.tool_calls.length === 0) delete delta.tool_calls;
+      }
+    }
+    if (Object.keys(delta).length === 0) return [];
+    return [{ id: `chatcmpl-${crypto.randomUUID()}`, object: 'chat.completion.chunk', created, model,
+      choices: [{ index: 0, delta, finish_reason: null }] }];
+  }
+  // 错误事件：记录并返回错误信息
+  if (event === 'error') {
+    console.error(`[normalizeTraeEvent] upstream error: ${data}`);
+    return [];
   }
   return [];
+}
+
+export class TraeEventNormalizer {
+  constructor(model) {
+    this.model = model;
+    this.toolState = new Map(); // idx → { id, type, name, args }
+    this.seenToolCalls = false;
+    this.finished = false;
+  }
+
+  /**
+   * 累积 tool_call 片段，不转发。
+   * 上游 SOLO 发送增量分片（先 name，再 arguments 片段），
+   * 必须等到 done 事件才能产生合法的完整 tool_call。
+   */
+  accumulateToolCalls(tcArray) {
+    for (const tc of tcArray) {
+      const idx = tc.index ?? 0;
+      const fc = tc.function || {};
+      let state = this.toolState.get(idx);
+      if (!state) {
+        state = { id: null, type: 'function', name: '', args: '' };
+        this.toolState.set(idx, state);
+      }
+      if (tc.id && !state.id) state.id = tc.id;
+      if (tc.type) state.type = tc.type;
+      if (fc.name && !state.name) state.name = fc.name;
+      if (fc.arguments) state.args += fc.arguments;
+    }
+    // 不返回任何 delta — 全部缓冲到 done 再 flush
+    return [];
+  }
+
+  /** 流末 flush：返回所有已累积的完整 tool_call（JSON 修复后） */
+  flushToolCalls() {
+    const out = [];
+    for (const [idx, st] of [...this.toolState.entries()].sort((a, b) => a[0] - b[0])) {
+      if (!st.name) continue;
+      const args = repairJsonArgs(st.args.trim());
+      if (!args) continue;
+      out.push({
+        index: idx,
+        id: st.id || `call_${idx}`,
+        type: st.type || 'function',
+        function: { name: st.name, arguments: args },
+      });
+    }
+    return out;
+  }
+
+  normalize(event, data) {
+    const created = Math.floor(Date.now() / 1000);
+    const id = `chatcmpl-${crypto.randomUUID()}`;
+
+    // done 事件：flush 累积的 tool_calls
+    if (event === 'done') {
+      this.finished = true;
+      if (this.seenToolCalls) {
+        const finalCalls = this.flushToolCalls();
+        if (finalCalls.length > 0) {
+          return [
+            { id, object: 'chat.completion.chunk', created, model: this.model,
+              choices: [{ index: 0, delta: { tool_calls: finalCalls }, finish_reason: null }] },
+            { id, object: 'chat.completion.chunk', created, model: this.model,
+              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
+          ];
+        }
+      }
+      let finish = 'stop';
+      try { finish = JSON.parse(data).finish_reason || 'stop'; } catch {}
+      return [{ id, object: 'chat.completion.chunk', created, model: this.model,
+        choices: [{ index: 0, delta: {}, finish_reason: finish }] }];
+    }
+
+    // output 事件：累积 tool_calls，转发 content/reasoning
+    if (event === 'output') {
+      let parsed;
+      try { parsed = JSON.parse(data); } catch { return []; }
+      const chunks = [];
+
+      // content 文本（含文本工具调用检测）
+      if (parsed.response) {
+        const text = parsed.response;
+        const tcResult = parseTextToolCalls(text);
+        if (tcResult) {
+          this.seenToolCalls = true;
+          this.accumulateToolCalls(tcResult.calls);
+          // 转发剥离工具调用标签后的剩余文本
+          if (tcResult.remainder) {
+            chunks.push({ id, object: 'chat.completion.chunk', created, model: this.model,
+              choices: [{ index: 0, delta: { content: tcResult.remainder }, finish_reason: null }] });
+          }
+        } else {
+          chunks.push({ id, object: 'chat.completion.chunk', created, model: this.model,
+            choices: [{ index: 0, delta: { content: text }, finish_reason: null }] });
+        }
+      }
+
+      // reasoning
+      if (parsed.reasoning_content) {
+        chunks.push({ id, object: 'chat.completion.chunk', created, model: this.model,
+          choices: [{ index: 0, delta: { reasoning_content: parsed.reasoning_content }, finish_reason: null }] });
+      }
+
+      // 原生 tool_calls
+      if (parsed.tool_calls && parsed.tool_calls !== 'null') {
+        let tc = parsed.tool_calls;
+        if (typeof tc === 'string') { try { tc = JSON.parse(tc); } catch { tc = null; } }
+        if (tc) {
+          if (!Array.isArray(tc)) tc = [tc];
+          try { logToolCall('RAW_TC', String(tc[0]?.function_call?.name ?? tc[0]?.function?.name ?? '?'), JSON.stringify(tc)); } catch {}
+          // 转换 function_call → function，清理 SOLO 字段
+          const normalized = tc.map(call => {
+            const fc = call.function_call || call.function;
+            if (!fc) return call;
+            delete fc.namespace;
+            delete fc.partial_arguments;
+            let args = fc.arguments;
+            if (!args || args === 'null' || args === 'undefined') args = '';
+            else if (typeof args === 'object') args = JSON.stringify(args);
+            // 清理 arguments 中的污染字段
+            if (args && typeof args === 'string' && args.includes('"description"')) {
+              try {
+                const p = JSON.parse(args);
+                if (p && typeof p === 'object') {
+                  let changed = false;
+                  for (const key of ['description', 'namespace', 'partial_arguments', 'type', 'id']) {
+                    if (key in p && typeof p[key] === 'string') { delete p[key]; changed = true; }
+                  }
+                  if (changed) args = JSON.stringify(p);
+                }
+              } catch {}
+            }
+            return { index: call.index ?? 0, id: call.id, type: call.type || 'function',
+              function: { name: fc.name || '', arguments: args } };
+          });
+          this.seenToolCalls = true;
+          this.accumulateToolCalls(normalized);
+          // 不转发增量 — 全部缓冲到 done 再 flush
+        }
+      }
+
+      return chunks;
+    }
+
+    // token_usage / 其他事件
+    if (event === 'token_usage') {
+      let usage = null;
+      try { const d = JSON.parse(data); usage = { prompt_tokens: d.prompt_tokens, completion_tokens: d.completion_tokens }; } catch {}
+      if (!usage) return [];
+      return [{ id, object: 'chat.completion.chunk', created, model: this.model,
+        choices: [{ index: 0, delta: {}, finish_reason: null }], usage }];
+    }
+
+    return [];
+  }
+}
+
+/** 尽力修复被流式截断的 JSON arguments */
+function repairJsonArgs(raw) {
+  if (!raw) return null;
+  try { JSON.parse(raw); return raw; } catch {}
+  let s = raw.trim();
+  // 补齐未闭合的字符串
+  let inStr = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]; if (c === '\\') { i++; continue; } if (c === '"') inStr = !inStr;
+  }
+  let candidate = inStr ? s + '"' : s;
+  // 补齐未闭合的括号
+  let depth = 0; inStr = false;
+  for (let i = 0; i < candidate.length; i++) {
+    const c = candidate[i]; if (c === '\\') { i++; continue; }
+    if (c === '"') { inStr = !inStr; continue; } if (inStr) continue;
+    if (c === '{' || c === '[') depth++; else if (c === '}' || c === ']') depth--;
+  }
+  for (let i = 0; i < depth; i++) candidate += '}';
+  try {
+    const p = JSON.parse(candidate);
+    if (p && typeof p === 'object' && Object.keys(p).length > 0) return JSON.stringify(p);
+  } catch {}
+  // 二次：去悬空逗号/冒号
+  let c2 = candidate.replace(/,\s*$/, '');
+  if (/:\s*$/.test(c2)) c2 = c2.replace(/:\s*$/, '').replace(/,\s*$/, '').replace(/,\s*"[^"]*"?\s*$/, '');
+  for (let i = 0; i < depth; i++) c2 += '}';
+  try {
+    const p = JSON.parse(c2);
+    if (p && typeof p === 'object' && Object.keys(p).length > 0) return JSON.stringify(p);
+  } catch {}
+  return null;
+}
+
+/** 检测文本中的工具调用格式（DeepSeek/文本注入），返回 {calls, remainder} 或 null */
+function parseTextToolCalls(text) {
+  // DeepSeek 原生格式
+  const fcBegin = text.indexOf('<|FunctionCallBegin|>');
+  if (fcBegin >= 0) {
+    const fcEnd = text.indexOf('<|FunctionCallEnd|>');
+    const endPos = fcEnd >= 0 ? fcEnd + '<|FunctionCallEnd|>'.length : text.length;
+    const jsonStr = text.substring(fcBegin + '<|FunctionCallBegin|>'.length, fcEnd >= 0 ? fcEnd : undefined).trim();
+    try {
+      let calls = JSON.parse(jsonStr);
+      if (!Array.isArray(calls)) calls = [calls];
+      const remainder = (text.substring(0, fcBegin) + ' ' + text.substring(endPos)).trim();
+      return {
+        calls: calls.map((c, i) => ({
+          index: i, id: `call_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`,
+          type: 'function',
+          function: { name: c.name || c.function || '', arguments: typeof c.parameters === 'object' ? JSON.stringify(c.parameters || {}) : (c.arguments || c.parameters || '') },
+        })),
+        remainder,
+      };
+    } catch {
+      // JSON 解析失败 → 纯文本工具名（如 agent-skills:code-review）
+      if (jsonStr.length > 0 && jsonStr.length < 200) {
+        const remainder = (text.substring(0, fcBegin) + ' ' + text.substring(endPos)).trim();
+        return {
+          calls: [{
+            index: 0, id: `call_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`,
+            type: 'function',
+            function: { name: jsonStr, arguments: '{}' },
+          }],
+          remainder,
+        };
+      }
+    }
+  }
+  // 文本注入格式
+  const tcBegin = text.indexOf('<tool_call>');
+  if (tcBegin >= 0) {
+    const tcEnd = text.indexOf('</tool_call>');
+    const endPos = tcEnd >= 0 ? tcEnd + '</tool_call>'.length : text.length;
+    const jsonStr = text.substring(tcBegin + '<tool_call>'.length, tcEnd >= 0 ? tcEnd : undefined);
+    try {
+      const call = JSON.parse(jsonStr.trim());
+      const remainder = (text.substring(0, tcBegin) + ' ' + text.substring(endPos)).trim();
+      return {
+        calls: [{
+          index: 0, id: `call_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`,
+          type: 'function',
+          function: { name: call.name || '', arguments: typeof call.arguments === 'object' ? JSON.stringify(call.arguments || {}) : (call.arguments || '') },
+        }],
+        remainder,
+      };
+    } catch {}
+  }
+  return null;
 }
 
 /** tc AES-128-CBC + SHA-512 完整性 解密 Trae 的单个加密值 */
@@ -114,46 +509,25 @@ function readStorageAuth() {
   return JSON.parse(decryptTc(blob));
 }
 
-function postJsonBuffer(url, headers, body, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const buf = Buffer.from(JSON.stringify(body));
-    const req = https.request(u, { method: 'POST', headers: { ...headers, 'Content-Length': buf.length } }, (res) => {
-      const data = [];
-      res.on('data', (c) => data.push(c));
-      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(data).toString('utf8') }));
-    });
-    req.on('error', reject);
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('trae timeout')));
-    req.write(buf);
-    req.end();
-  });
+const RETRYABLE = new Set([429, 502, 503, 504]);
+const MAX_RETRIES = 2;
+
+function isRetryable(err) {
+  const m = err?.message || '';
+  if (m.includes('timeout') || m.includes('ECONNRESET') || m.includes('ETIMEDOUT')) return true;
+  for (const code of RETRYABLE) {
+    if (m.includes(`upstream ${code}`)) return true;
+  }
+  return false;
 }
 
-function parseTraeSse(res, model, emit, log) {
-  if (res.status >= 400) throw new Error(`Trae CN upstream ${res.status}: ${res.body.slice(0, 200)}`);
-  let currentEvent = '';
-  for (const raw of res.body.split('\n')) {
-    const line = raw.trim();
-    if (line.startsWith('event:')) { currentEvent = line.slice(6).trim(); log?.(`sse.event`, currentEvent); continue; }
-    if (line.startsWith('data:')) {
-      const data = line.slice(5).trim();
-      log?.(`sse.data`, `${currentEvent} | ${data.slice(0, 300)}`);
-      const chunks = normalizeTraeEvent(currentEvent, data, model);
-      if (chunks.length === 0 && currentEvent && currentEvent !== 'done') {
-        // 未识别事件被丢弃——工具事件通常就藏在这里
-        log?.(`sse.dropped`, `${currentEvent} | ${data.slice(0, 300)}`);
-      }
-      for (const chunk of chunks) emit(chunk);
-    }
-  }
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 export class TraeCnAdapter {
   constructor(options = {}) {
     this.id = 'traecn';
     this.upstream = options.upstream || UPSTREAM_BASE_CN;
-    this.timeoutMs = options.timeoutMs || 120000;
+    this.timeoutMs = options.timeoutMs || 180000; // 3min — 复杂推理需要更长
     this.cache = new CredentialsCache();
     this.debug = options.debug !== undefined ? options.debug : debugEnabled();
   }
@@ -197,39 +571,117 @@ export class TraeCnAdapter {
       Accept: 'text/event-stream',
     };
     const body = {
-      messages: (reqBody.messages || []).map((m) => ({
-        role: m.role,
-        content: typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content,
-      })),
-      model: reqBody.model,
-      function: 'inline_chat',
+      messages: (reqBody.messages || []).map((m) => {
+        const role = m.role === 'developer' ? 'system' : m.role;
+        // tool 角色消息：content 转为数组格式（与参考实现对齐），保留 tool_call_id
+        if (role === 'tool') {
+          const out = { role, content: typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content };
+          if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+          return out;
+        }
+        // assistant 消息带 tool_calls：OpenAI function → Trae function_call（含 index）
+        if (m.tool_calls) {
+          const tcs = m.tool_calls
+            .map((tc, i) => {
+              const fn = tc.function;
+              if (!fn) return null;
+              if (!fn.name?.trim()) return null;
+              let args = fn.arguments;
+              if (typeof args !== 'string') args = JSON.stringify(args ?? {});
+              return {
+                index: i,
+                id: tc.id || '',
+                type: tc.type || 'function',
+                function_call: { name: fn.name, arguments: args },
+              };
+            })
+            .filter(Boolean);
+          const out = { role, content: m.content ?? null };
+          if (tcs.length > 0) out.tool_calls = tcs;
+          return out;
+        }
+        return {
+          role,
+          content: typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content,
+        };
+      }),
+      model: normalizeModel(reqBody.model),
+      config_name: normalizeModel(reqBody.model),
+      function: 'chat_v3',
       stream: true,
       request_id: crypto.randomUUID(),
       session_id: crypto.randomUUID(),
     };
     if (reqBody.max_tokens) body.max_tokens = reqBody.max_tokens;
+    // tools 处理：不支持原生 function calling 的模型走文本注入
+    if (reqBody.tools?.length > 0 && needsTextTools(reqBody.model)) {
+      const injected = injectTools({ ...reqBody, messages: body.messages });
+      body.messages = injected.messages;
+    } else if (reqBody.tools) {
+      // 原生工具支持：与参考实现对齐——parameters → JSON 字符串，description 保留
+      body.tools = reqBody.tools
+        .filter(t => t.type === 'function' && t.function)
+        .map(t => {
+          const fn = t.function;
+          const out = {
+            type: 'function',
+            function: {
+              name: fn.name,
+              description: fn.description || '',
+            },
+          };
+          if (fn.parameters !== undefined) {
+            out.function.parameters = typeof fn.parameters === 'string'
+              ? fn.parameters
+              : JSON.stringify(fn.parameters);
+          }
+          return out;
+        })
+        .filter(t => t.function.name?.trim());
+      if (body.tools.length === 0) {
+        delete body.tools;
+      } else if (reqBody.tool_choice) {
+        // 客户端显式指定 tool_choice：归一化后透传
+        const tc = reqBody.tool_choice;
+        if (typeof tc === 'string') {
+          if (tc.toLowerCase() === 'none') delete body.tools;
+          else body.tool_choice = tc;
+        } else if (typeof tc === 'object') {
+          const typ = (tc.type || '').toLowerCase();
+          if (typ === 'none') delete body.tools;
+          else if (typ === 'auto' || typ === 'required') body.tool_choice = typ;
+          else if (typ === 'function' && tc.function?.name) body.tool_choice = tc.function.name;
+        }
+      } else {
+        // 客户端未指定 → auto，让模型自由选择文本/工具（不可用 required，会诱导空参数调用）
+        body.tool_choice = 'auto';
+      }
+    }
 
-    // 诊断：入站是否带工具定义/工具调用记录？出站消息结构如何？function 是否该切换？
-    const msgs = reqBody.messages || [];
-    this.log('inbound', JSON.stringify({
-      model: reqBody.model,
-      hasTools: Array.isArray(reqBody.tools) && reqBody.tools.length > 0,
-      toolsCount: reqBody.tools?.length ?? 0,
-      toolChoice: reqBody.tool_choice,
-      roles: msgs.map((m) => m.role),
-      hasToolCalls: msgs.some((m) => Array.isArray(m.tool_calls) && m.tool_calls.length > 0),
-    }));
-    this.log('outbound', JSON.stringify({ function: body.function, messages: body.messages, stream: body.stream }));
-
+    const bodyStr = JSON.stringify(body);
     let lastErr = null;
-    for (const ep of CHAT_ENDPOINTS) {
-      try {
-        this.log('upstream', `-> ${ep}`);
-        const res = await postJsonBuffer(`${this.upstream}${ep}`, headers, body, this.timeoutMs);
-        this.log('upstream', `<- ${ep} status ${res.status}`);
-        parseTraeSse(res, reqBody.model, emit, this.log.bind(this));
-        return;
-      } catch (e) { this.log('upstream', `!! ${ep} ${e.message}`); lastErr = e; }
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        try { await this.refreshAuth(); const a = await this.getAuth(); headers.Authorization = `Cloud-IDE-JWT ${a.token}`; headers['X-Cloudide-Token'] = a.token; } catch {}
+        await sleep(1000 * attempt);
+      }
+      for (const ep of CHAT_ENDPOINTS) {
+        try {
+          this.log('upstream', `-> ${ep} (attempt ${attempt})`);
+          const normalizer = new TraeEventNormalizer(reqBody.model);
+          await postStreamingTraeSSE(`${this.upstream}${ep}`, headers, bodyStr, this.timeoutMs, reqBody.model, (ev, d, _m) => normalizer.normalize(ev, d), emit);
+          return; // 成功
+        } catch (e) {
+          this.log('upstream', `!! ${ep} ${e.message}`);
+          lastErr = e;
+          if (e.message.includes('401') || e.message.includes('403')) {
+            // 认证错误：刷新后重试整个端点列表
+            break;
+          }
+        }
+      }
+      // 非可重试错误，提前退出
+      if (!isRetryable(lastErr)) break;
     }
     throw lastErr || new Error('Trae CN 所有上游端点均失败');
   }

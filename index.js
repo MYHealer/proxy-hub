@@ -91,6 +91,20 @@ function handleChat(req, res, registry, config, usage) {
       return sendJson(res, 400, { error: { message: 'Invalid JSON body' } });
     }
     const model = body.model || 'auto';
+    try {
+      const fs = await import('node:fs');
+      const sysMsg = (body.messages || []).find(m => m.role === 'system');
+      const sysText = typeof sysMsg?.content === 'string' ? sysMsg.content
+        : Array.isArray(sysMsg?.content) ? sysMsg.content.map(c => c.text || '').join('') : '';
+      fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log',
+        `[${new Date().toISOString()}] model=${model} tools=${body.tools?.length ?? 0} sysLen=${sysText.length}\n`);
+      if (sysText) {
+        fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log',
+          `  sysHead: ${sysText.slice(0, 300).replace(/\n/g, ' ')}\n`);
+        fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log',
+          `  sysHasToolGuidance: ${/tool|function|操作|执行|command/i.test(sysText)}\n`);
+      }
+    } catch {}
     const resolved = registry.resolveModel(model);
     if (!resolved) {
       const ids = registry.listModels().map((m) => m.id);

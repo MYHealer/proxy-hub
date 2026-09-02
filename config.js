@@ -16,7 +16,7 @@ function readConfigFile() {
 const DEFAULTS = {
   port: 8787,
   proxyKey: '',
-  timeoutMs: 120000,
+  timeoutMs: 180000,
   adapters: { codebuddy: true, traecn: true, traework: true, qoder: true },
   upstreamOverrides: {},
 };

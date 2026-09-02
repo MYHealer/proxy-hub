@@ -3,6 +3,7 @@ export class Registry {
   constructor() {
     this.adapters = new Map();   // adapterId -> adapter
     this.external = new Map();   // externalId -> {adapterId, upstreamId}
+    this.prefixMap = new Map();  // prefix -> adapterId  (e.g. "codebuddy-" -> "codebuddy")
   }
 
   register(adapter) {
@@ -10,14 +11,26 @@ export class Registry {
     for (const m of adapter.registerModels()) {
       this.external.set(m.externalId, { adapterId: adapter.id, upstreamId: m.upstreamId });
     }
+    // Register prefix for pass-through routing (e.g. "codebuddy-" -> "codebuddy")
+    this.prefixMap.set(`${adapter.id}-`, adapter.id);
   }
 
-  /** 输入 externalId，返回 { adapter, upstreamId }；未知返回 null */
+  /** 输入 externalId，返回 { adapter, upstreamId }；未知但匹配前缀时透传，否则返回 null */
   resolveModel(externalId) {
     const entry = this.external.get(externalId);
-    if (!entry) return null;
-    const adapter = this.adapters.get(entry.adapterId);
-    return { adapter, upstreamId: entry.upstreamId };
+    if (entry) {
+      const adapter = this.adapters.get(entry.adapterId);
+      return { adapter, upstreamId: entry.upstreamId };
+    }
+    // Pass-through: model not in whitelist but matches an adapter prefix
+    for (const [prefix, adapterId] of this.prefixMap) {
+      if (externalId.startsWith(prefix)) {
+        const adapter = this.adapters.get(adapterId);
+        const upstreamId = externalId.slice(prefix.length);
+        return { adapter, upstreamId };
+      }
+    }
+    return null;
   }
 
   /** 返回对外模型数组 [{ id, object:'model', owned_by }] */
