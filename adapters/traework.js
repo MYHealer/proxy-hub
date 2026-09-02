@@ -260,32 +260,105 @@ export class TraeWorkAdapter {
   }
 
   /**
-   * 自动压缩对话历史：保留 system + 最近 N 轮对话，截断过长的旧消息
+   * 估算文本的 token 数（中英混合启发式）
+   * 中文约 1.5 token/字，英文约 0.25 token/char（1 token ≈ 4 chars）
+   */
+  _estimateTokens(text) {
+    if (!text) return 0;
+    let cn = 0;
+    for (const ch of text) {
+      if (ch.charCodeAt(0) > 0x7f) cn++;
+    }
+    const en = text.length - cn;
+    return Math.ceil(cn * 1.5 + en / 4);
+  }
+
+  /**
+   * 获取单条消息的 token 估算值
+   */
+  _msgTokens(msg) {
+    if (!msg) return 0;
+    if (typeof msg.content === 'string') return this._estimateTokens(msg.content);
+    if (Array.isArray(msg.content)) {
+      return msg.content.reduce((s, c) => s + this._estimateTokens(c.text || c.content || JSON.stringify(c)), 0);
+    }
+    return this._estimateTokens(JSON.stringify(msg.content));
+  }
+
+  /**
+   * 自动压缩对话历史：token 预算制，从最新消息往前累积
    * 防止上游因上下文窗口限制而截断导致模型"失忆"
    */
   _compressMessages(messages, maxTurns = 15) {
-    if (!Array.isArray(messages) || messages.length <= maxTurns * 2 + 1) {
-      return messages; // 消息数量未超限，直接返回
+    if (!Array.isArray(messages) || messages.length === 0) return messages;
+
+    // Token 预算（DeepSeek 上下文 64K~128K，留 ~30K 给消息）
+    const TOKEN_BUDGET = 30000;
+    // 单条消息最大允许 token（超长则截断）
+    const MAX_SINGLE_MSG = 8000;
+
+    const systemMsgs = messages.filter(m => m.role === 'system');
+    const dialogMsgs = messages.filter(m => m.role !== 'system');
+
+    // 计算 system 消息的 token 占用（始终保留）
+    const systemTokens = systemMsgs.reduce((s, m) => s + this._msgTokens(m), 0);
+    let remaining = TOKEN_BUDGET - systemTokens;
+
+    // 也做消息数量上限保护
+    const maxMsgs = maxTurns * 2;
+
+    // 从最新消息往前累积
+    const kept = [];
+    let usedTokens = 0;
+    for (let i = dialogMsgs.length - 1; i >= 0; i--) {
+      if (kept.length >= maxMsgs) break;
+      const msg = dialogMsgs[i];
+      const tok = this._msgTokens(msg);
+
+      if (tok > MAX_SINGLE_MSG) {
+        // 单条过长：截断内容
+        const truncated = this._truncateMsgContent(msg, MAX_SINGLE_MSG);
+        const truncTok = this._msgTokens(truncated);
+        if (usedTokens + truncTok > remaining) break;
+        kept.unshift(truncated);
+        usedTokens += truncTok;
+        continue;
+      }
+
+      if (usedTokens + tok > remaining) break;
+      kept.unshift(msg);
+      usedTokens += tok;
     }
 
-    // 分离 system 消息和对话消息
-    const systemMessages = messages.filter(m => m.role === 'system');
-    const dialogMessages = messages.filter(m => m.role !== 'system');
+    const dropped = dialogMsgs.length - kept.length;
 
-    // 如果没有 system 消息，直接截断对话
-    if (systemMessages.length === 0) {
-      const truncated = dialogMessages.slice(-maxTurns * 2);
-      dbg(`[compress] 无 system 消息，截断 ${dialogMessages.length} -> ${truncated.length} 条`);
-      return truncated;
+    if (dropped > 0) {
+      // 注入上下文压缩标记
+      const marker = { role: 'user', content: `[Earlier ${dropped} messages compressed to fit context window]` };
+      const result = [...systemMsgs, marker, ...kept];
+      dbg(`[compress] token-budget: system=${systemTokens} dialog=${usedTokens}/${TOKEN_BUDGET} dropped=${dropped} kept=${kept.length}/${dialogMsgs.length}`);
+      return result;
     }
 
-    // 有 system 消息：保留 system + 最近 maxTurns 轮对话
-    const recentDialog = dialogMessages.slice(-maxTurns * 2);
-    const compressed = [...systemMessages, ...recentDialog];
+    // 没有丢弃消息，但可能有单条截断
+    if (kept.some((m, i) => m !== dialogMsgs[i])) {
+      dbg(`[compress] truncated oversized messages, kept all ${kept.length} messages`);
+    }
+    return [...systemMsgs, ...kept];
+  }
 
-    dbg(`[compress] 保留 system(${systemMessages.length}) + 最近 ${recentDialog.length} 条对话，丢弃 ${dialogMessages.length - recentDialog.length} 条旧消息`);
-
-    return compressed;
+  /** 截断单条消息内容到指定 token 预算 */
+  _truncateMsgContent(msg, maxTokens) {
+    if (this._msgTokens(msg) <= maxTokens) return msg;
+    const newMsg = { ...msg };
+    if (typeof newMsg.content === 'string') {
+      const ratio = maxTokens / this._msgTokens(newMsg.content);
+      const charLimit = Math.floor(newMsg.content.length * ratio * 0.8);
+      newMsg.content = newMsg.content.slice(0, charLimit) + '\n[... truncated ...]';
+    } else if (Array.isArray(newMsg.content)) {
+      newMsg.content = [{ type: 'text', text: '[Long tool output truncated]' }];
+    }
+    return newMsg;
   }
 
   async chat(reqBody, emit) {

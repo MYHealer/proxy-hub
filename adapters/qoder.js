@@ -34,7 +34,7 @@ const MODELS = [
 ];
 
 /** 从 stream-json 单行解析出文本增量 */
-function parseCliDelta(line) {
+export function parseCliDelta(line) {
   let rec;
   try { rec = JSON.parse(line); } catch { return null; }
   if (rec.type !== 'assistant') return null;
