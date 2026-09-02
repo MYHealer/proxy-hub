@@ -113,6 +113,9 @@ export class TraeWorkAdapter {
     this.storageFile = options.storageFile || traeStoragePath(PRODUCT_DIR);
     this.authKey = options.authKey || AUTH_KEY;
     this.cache = new CredentialsCache();
+    // 稳定会话 ID：同一 adapter 实例复用，让上游维持对话上下文
+    this.sessionId = '6a' + crypto.randomBytes(11).toString('hex').slice(0, 21);
+    this.conversationId = '6a' + crypto.randomBytes(11).toString('hex').slice(0, 21);
   }
 
   async getAuth() {
@@ -288,10 +291,9 @@ export class TraeWorkAdapter {
       request_id: crypto.randomUUID(),
     };
     // 仅在 work credits 模式下添加会话字段（与参考实现对齐）
-    // session_id / conversation_id 使用 '6a' + hex(21) 格式
-    const hex21 = crypto.randomBytes(11).toString('hex').slice(0, 21);
-    body.session_id = '6a' + hex21;
-    body.conversation_id = '6a' + crypto.randomBytes(11).toString('hex').slice(0, 21);
+    // session_id / conversation_id 使用构造时生成的稳定值
+    body.session_id = this.sessionId;
+    body.conversation_id = this.conversationId;
     body.user_input = extractUserInput(reqBody.messages);
     body.access_type = 1;
     body.metadata = { is_remote_req: false };

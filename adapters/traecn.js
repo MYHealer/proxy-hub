@@ -530,6 +530,8 @@ export class TraeCnAdapter {
     this.timeoutMs = options.timeoutMs || 180000; // 3min — 复杂推理需要更长
     this.cache = new CredentialsCache();
     this.debug = options.debug !== undefined ? options.debug : debugEnabled();
+    // 稳定会话 ID：同一 adapter 实例复用，让上游维持对话上下文
+    this.sessionId = crypto.randomUUID();
   }
 
   log(label, ...args) {
@@ -610,7 +612,7 @@ export class TraeCnAdapter {
       function: 'chat_v3',
       stream: true,
       request_id: crypto.randomUUID(),
-      session_id: crypto.randomUUID(),
+      session_id: this.sessionId,
     };
     if (reqBody.max_tokens) body.max_tokens = reqBody.max_tokens;
     // tools 处理：不支持原生 function calling 的模型走文本注入
