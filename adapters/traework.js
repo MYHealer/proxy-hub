@@ -259,12 +259,44 @@ export class TraeWorkAdapter {
     }
   }
 
+  /**
+   * 自动压缩对话历史：保留 system + 最近 N 轮对话，截断过长的旧消息
+   * 防止上游因上下文窗口限制而截断导致模型"失忆"
+   */
+  _compressMessages(messages, maxTurns = 15) {
+    if (!Array.isArray(messages) || messages.length <= maxTurns * 2 + 1) {
+      return messages; // 消息数量未超限，直接返回
+    }
+
+    // 分离 system 消息和对话消息
+    const systemMessages = messages.filter(m => m.role === 'system');
+    const dialogMessages = messages.filter(m => m.role !== 'system');
+
+    // 如果没有 system 消息，直接截断对话
+    if (systemMessages.length === 0) {
+      const truncated = dialogMessages.slice(-maxTurns * 2);
+      dbg(`[compress] 无 system 消息，截断 ${dialogMessages.length} -> ${truncated.length} 条`);
+      return truncated;
+    }
+
+    // 有 system 消息：保留 system + 最近 maxTurns 轮对话
+    const recentDialog = dialogMessages.slice(-maxTurns * 2);
+    const compressed = [...systemMessages, ...recentDialog];
+
+    dbg(`[compress] 保留 system(${systemMessages.length}) + 最近 ${recentDialog.length} 条对话，丢弃 ${dialogMessages.length - recentDialog.length} 条旧消息`);
+
+    return compressed;
+  }
+
   async chat(reqBody, emit) {
     const { token, userId } = await this.getAuth();
     const machineId = crypto.randomBytes(16).toString('hex');
 
+    // 自动压缩对话历史（保留 system + 最近 15 轮对话）
+    const compressedMessages = this._compressMessages(reqBody.messages, 15);
+
     const body = {
-      messages: (reqBody.messages || []).map((m, idx) => {
+      messages: compressedMessages.map((m, idx) => {
         // developer → system（上游只接受 system/assistant/user/tool）
         const role = m.role === 'developer' ? 'system' : m.role;
         dbg(`msg[${idx}] role=${role} content=${typeof m.content === 'string' ? m.content.slice(0, 80) : typeof m.content}`);
