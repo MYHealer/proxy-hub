@@ -113,9 +113,6 @@ export class TraeWorkAdapter {
     this.storageFile = options.storageFile || traeStoragePath(PRODUCT_DIR);
     this.authKey = options.authKey || AUTH_KEY;
     this.cache = new CredentialsCache();
-    // 稳定会话 ID：同一 adapter 实例复用，让上游维持对话上下文
-    this.sessionId = '6a' + crypto.randomBytes(11).toString('hex').slice(0, 21);
-    this.conversationId = '6a' + crypto.randomBytes(11).toString('hex').slice(0, 21);
   }
 
   async getAuth() {
@@ -290,10 +287,9 @@ export class TraeWorkAdapter {
       stream: true,
       request_id: crypto.randomUUID(),
     };
-    // 仅在 work credits 模式下添加会话字段（与参考实现对齐）
-    // session_id / conversation_id 使用构造时生成的稳定值
-    body.session_id = this.sessionId;
-    body.conversation_id = this.conversationId;
+    // 与参考实现对齐：每次请求随机 session_id，上游靠 messages 数组维持上下文
+    body.session_id = '6a' + crypto.randomBytes(11).toString('hex').slice(0, 21);
+    body.conversation_id = '6a' + crypto.randomBytes(11).toString('hex').slice(0, 21);
     body.user_input = extractUserInput(reqBody.messages);
     body.access_type = 1;
     body.metadata = { is_remote_req: false };
@@ -350,7 +346,7 @@ export class TraeWorkAdapter {
     // 诊断日志：记录实际发给上游的请求
     const _toolNames = (body.tools || []).slice(0, 5).map(t => t.function?.name || '?').join(',');
     const _toolTotal = body.tools?.length || 0;
-    console.error(`[traework] UPSTREAM: ${bodyStr.length}B, tools=${_toolTotal}(${_toolNames}...), function=${body.function}, msgs=${body.messages?.length}`);
+    console.error(`[traework] UPSTREAM: ${bodyStr.length}B, tools=${_toolTotal}(${_toolNames}...), function=${body.function}, msgs=${body.messages?.length}, sid=${body.session_id?.slice(0,10)}`);
     let lastErr = null;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {

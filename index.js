@@ -97,7 +97,12 @@ function handleChat(req, res, registry, config, usage) {
       const sysText = typeof sysMsg?.content === 'string' ? sysMsg.content
         : Array.isArray(sysMsg?.content) ? sysMsg.content.map(c => c.text || '').join('') : '';
       fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log',
-        `[${new Date().toISOString()}] model=${model} tools=${body.tools?.length ?? 0} sysLen=${sysText.length}\n`);
+        `[${new Date().toISOString()}] model=${model} tools=${body.tools?.length ?? 0} sysLen=${sysText.length} msgs=${body.messages?.length ?? 0}\n`);
+      if (body.messages?.length > 0) {
+        const roles = body.messages.map(m => m.role).join(',');
+        fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log',
+          `  msgRoles: ${roles}\n`);
+      }
       if (sysText) {
         fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log',
           `  sysHead: ${sysText.slice(0, 300).replace(/\n/g, ' ')}\n`);
