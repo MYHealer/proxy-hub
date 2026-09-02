@@ -4,7 +4,7 @@ import https from 'node:https';
 import { CredentialsCache } from '../credentials.js';
 import { decryptTc, traeStoragePath, normalizeTraeEvent, TraeEventNormalizer } from './traecn.js';
 import { postStreamingTraeSSE } from '../sse.js';
-import { needsTextTools, injectTools } from '../tool-compat.js';
+import { injectTools } from '../tool-compat.js';
 
 // TraeWork 桌面版（即 TRAE SOLO 升级版）适配器。
 // 与 Trae CN 共享同一套 tc 解密算法与上游主机，差异仅在：
@@ -309,39 +309,75 @@ export class TraeWorkAdapter {
     body.metadata = { is_remote_req: false };
     body.request_seq = 1;
     if (reqBody.max_tokens) body.max_tokens = reqBody.max_tokens;
-    // few-shot 注入：新会话 + 有工具时，注入工具调用示例帮助模型学会格式
+    // few-shot 注入：新会话 + 有工具时，注入多个工具调用示例帮助模型学会格式
+    try { fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log', `[${new Date().toISOString()}] few-shot check: tools=${reqBody.tools?.length ?? 0} msgs=${body.messages.length}\n`); } catch {}
     if (reqBody.tools?.length > 0 && body.messages.length <= 4) {
-      const exampleToolCall = {
-        role: 'assistant',
-        content: null,
-        tool_calls: [{
-          index: 0,
-          id: 'call_example_001',
-          type: 'function',
-          function_call: {
-            name: 'Read',
-            arguments: '{"file_path": "/tmp/example.py"}'
+      const examples = [
+        // 示例1: Read 工具
+        {
+          call: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [{
+              index: 0, id: 'call_fewshot_001', type: 'function',
+              function_call: { name: 'Read', arguments: '{"file_path": "example.py"}' }
+            }]
+          },
+          resp: {
+            role: 'tool', tool_call_id: 'call_fewshot_001',
+            content: [{ type: 'text', text: 'print("hello world")' }]
           }
-        }]
-      };
-      const exampleToolResponse = {
-        role: 'tool',
-        tool_call_id: 'call_example_001',
-        content: [{ type: 'text', text: 'print("hello world")' }]
-      };
-      // 在第一条用户消息后插入示例
+        },
+        // 示例2: Write 工具
+        {
+          call: {
+            role: 'assistant',
+            content: 'I will create the file for you.',
+            tool_calls: [{
+              index: 0, id: 'call_fewshot_002', type: 'function',
+              function_call: { name: 'Write', arguments: '{"file_path": "output.py", "content": "x = 42\\nprint(x)"}' }
+            }]
+          },
+          resp: {
+            role: 'tool', tool_call_id: 'call_fewshot_002',
+            content: [{ type: 'text', text: 'File written successfully' }]
+          }
+        },
+        // 示例3: Bash 工具
+        {
+          call: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [{
+              index: 0, id: 'call_fewshot_003', type: 'function',
+              function_call: { name: 'Bash', arguments: '{"command": "ls -la"}' }
+            }]
+          },
+          resp: {
+            role: 'tool', tool_call_id: 'call_fewshot_003',
+            content: [{ type: 'text', text: 'total 0\ndrwxr-xr-x  2 user staff  64 Jan  1 00:00 .\ndrwxr-xr-x  3 user staff  96 Jan  1 00:00 ..' }]
+          }
+        }
+      ];
+      // 在第一条用户消息后插入所有示例
       const insertIdx = body.messages.findIndex(m => m.role === 'user');
       if (insertIdx >= 0) {
-        body.messages.splice(insertIdx + 1, 0, exampleToolCall, exampleToolResponse);
-        try { fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log', `[${new Date().toISOString()}] INJECTED few-shot tool call example\n`); } catch {}
+        const toInsert = examples.flatMap(e => [e.call, e.resp]);
+        body.messages.splice(insertIdx + 1, 0, ...toInsert);
+        try { fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log', `[${new Date().toISOString()}] INJECTED ${examples.length} few-shot tool call examples\n`); } catch {}
       }
     }
-    // tools 处理：不支持原生 function calling 的模型走文本注入
-    if (reqBody.tools?.length > 0 && needsTextTools(reqBody.model)) {
+    // tools 处理：始终注入文本工具描述到 system prompt（确保模型能看到工具），
+    // 同时发送原生 tools 参数（如果上游支持）。
+    // 关键：Trae 上游 API 不一定把 tools 参数传给模型，但 system prompt 一定传。
+    if (reqBody.tools?.length > 0) {
+      // 先注入文本工具描述
       const injected = injectTools({ ...reqBody, messages: body.messages });
       body.messages = injected.messages;
-    } else if (reqBody.tools) {
-      // 原生工具支持：与参考实现对齐——parameters → JSON 字符串，description 保留
+      const _sysMsg = body.messages.find(m => m.role === 'system');
+      const _sysLen = typeof _sysMsg?.content === 'string' ? _sysMsg.content.length : 0;
+      try { fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log', `[${new Date().toISOString()}] AFTER tool text injection: sysLen=${_sysLen}\n`); } catch {}
+      // 再发送原生 tools（双保险）
       body.tools = reqBody.tools
         .filter(t => t.type === 'function' && t.function)
         .map(t => {
@@ -376,10 +412,8 @@ export class TraeWorkAdapter {
           else if (typ === 'function' && tc.function?.name) body.tool_choice = tc.function.name;
         }
       } else {
-        // 客户端未指定 → 用 auto 让模型自由选择文本/工具。
-        // 注意：不能用 'required'——强制调工具会让模型在本该输出文本时
-        // 编造空参数的 tool_call，导致 "required parameter missing" 报错。
-        body.tool_choice = 'auto';
+        // 参考实现：有 tools 时强制 required
+        body.tool_choice = 'required';
       }
     }
 
@@ -388,6 +422,17 @@ export class TraeWorkAdapter {
     const _toolNames = (body.tools || []).slice(0, 5).map(t => t.function?.name || '?').join(',');
     const _toolTotal = body.tools?.length || 0;
     console.error(`[traework] UPSTREAM: ${bodyStr.length}B, tools=${_toolTotal}(${_toolNames}...), function=${body.function}, msgs=${body.messages?.length}, sid=${body.session_id?.slice(0,10)}`);
+    try {
+      const _tc = body.tool_choice ?? 'none';
+      const _msgSummary = body.messages.map(m => {
+        if (m.role === 'assistant' && m.tool_calls) return `assistant[${m.tool_calls.length}tc]`;
+        if (m.role === 'tool') return `tool[${m.tool_call_id?.slice(0,10) ?? '?'}]`;
+        return `${m.role}[${typeof m.content === 'string' ? m.content.slice(0,30) : typeof m.content}]`;
+      }).join(' → ');
+      const _toolsJson = JSON.stringify(body.tools || []).slice(0, 500);
+      fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log',
+        `[${new Date().toISOString()}] UPSTREAM body: tool_choice=${_tc}, tools=${_toolTotal}, msgs=${body.messages?.length}, flow: ${_msgSummary}\n  tools: ${_toolsJson}\n`);
+    } catch {}
     let lastErr = null;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
