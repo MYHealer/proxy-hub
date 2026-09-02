@@ -4,7 +4,6 @@ import https from 'node:https';
 import { CredentialsCache } from '../credentials.js';
 import { decryptTc, traeStoragePath, normalizeTraeEvent, TraeEventNormalizer } from './traecn.js';
 import { postStreamingTraeSSE } from '../sse.js';
-import { injectTools } from '../tool-compat.js';
 
 const LOG_PATH = 'C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log';
 const _debugEnabled = (() => { const v = process.env.PROXY_HUB_DEBUG; return v === '1' || v === 'true' || v === 'traework'; })();
@@ -384,17 +383,9 @@ export class TraeWorkAdapter {
         dbg(`INJECTED ${examples.length} few-shot tool call examples`);
       }
     }
-    // tools 处理：始终注入文本工具描述到 system prompt（确保模型能看到工具），
-    // 同时发送原生 tools 参数（如果上游支持）。
-    // 关键：Trae 上游 API 不一定把 tools 参数传给模型，但 system prompt 一定传。
+    // tools 处理：llm_utils_chat 支持原生 tools，不需要文本注入（双保险反而让模型混乱）。
+    // 文本注入只给不支持 tools 的回退端点用（但当前端点列表都是先尝试 llm_utils_chat）。
     if (reqBody.tools?.length > 0) {
-      // 先注入文本工具描述
-      const injected = injectTools({ ...reqBody, messages: body.messages });
-      body.messages = injected.messages;
-      const _sysMsg = body.messages.find(m => m.role === 'system');
-      const _sysLen = typeof _sysMsg?.content === 'string' ? _sysMsg.content.length : 0;
-      dbg(`AFTER tool text injection: sysLen=${_sysLen}`);
-      // 再发送原生 tools（双保险）
       body.tools = reqBody.tools
         .filter(t => t.type === 'function' && t.function)
         .map(t => {
