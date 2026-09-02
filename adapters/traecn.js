@@ -518,9 +518,22 @@ function parseTextToolCalls(text) {
         remainder,
       };
     } catch {
-      // JSON 解析失败 → 纯文本工具名（如 agent-skills:code-review）
+      // JSON 解析失败 → 尝试从畸形 JSON 中提取工具名
+      const remainder = (text.substring(0, fcBegin) + ' ' + text.substring(endPos)).trim();
+      // 正则匹配 "name":"tool-name" 或 "name": "tool-name" 模式
+      const nameMatch = jsonStr.match(/"name"\s*:\s*"([^"]+)"/);
+      if (nameMatch && nameMatch[1]) {
+        return {
+          calls: [{
+            index: 0, id: `call_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`,
+            type: 'function',
+            function: { name: nameMatch[1], arguments: '{}' },
+          }],
+          remainder,
+        };
+      }
+      // 纯文本工具名（如 agent-skills:code-review）
       if (jsonStr.length > 0 && jsonStr.length < 200) {
-        const remainder = (text.substring(0, fcBegin) + ' ' + text.substring(endPos)).trim();
         return {
           calls: [{
             index: 0, id: `call_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`,
