@@ -22,9 +22,9 @@ test('traework id is "traework" and default storage points to TRAE SOLO CN', () 
   assert.equal(traeStoragePath('TRAE SOLO CN'), ad.storageFile);
 });
 
-test('traework uses SOLO client id + chat_v3 function', () => {
+test('traework uses SOLO client id + solo_work_lite function', () => {
   assert.equal(SOLO_CLIENT_ID, 'en1oxy7wnw8j9n');
-  assert.equal(CHAT_FUNCTION, 'chat_v3');
+  assert.equal(CHAT_FUNCTION, 'solo_work_lite');
   assert.ok(MODELS.length > 0);
 });
 
