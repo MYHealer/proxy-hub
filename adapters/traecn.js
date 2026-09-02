@@ -238,6 +238,9 @@ export class TraeEventNormalizer {
     this.toolState = new Map(); // idx → { id, type, name, args }
     this.seenToolCalls = false;
     this.finished = false;
+    // 文本工具调用累积缓冲：处理分片的 <|FunctionCallBegin|>...<|FunctionCallEnd|>
+    this.textBuf = '';
+    this.inTextToolCall = false;
   }
 
   /**
@@ -284,24 +287,47 @@ export class TraeEventNormalizer {
     const created = Math.floor(Date.now() / 1000);
     const id = `chatcmpl-${crypto.randomUUID()}`;
 
-    // done 事件：flush 累积的 tool_calls
+    // done 事件：flush 累积的 tool_calls + 未完成的文本缓冲
     if (event === 'done') {
       this.finished = true;
+      const result = [];
+
+      // 处理未完成的文本工具调用缓冲
+      if (this.inTextToolCall && this.textBuf.length > 0) {
+        const tcResult = parseTextToolCalls(this.textBuf);
+        if (tcResult) {
+          this.seenToolCalls = true;
+          this.accumulateToolCalls(tcResult.calls);
+          if (tcResult.remainder) {
+            result.push({ id, object: 'chat.completion.chunk', created, model: this.model,
+              choices: [{ index: 0, delta: { content: tcResult.remainder }, finish_reason: null }] });
+          }
+        } else {
+          // 解析失败，当普通文本发出
+          result.push({ id, object: 'chat.completion.chunk', created, model: this.model,
+            choices: [{ index: 0, delta: { content: this.textBuf }, finish_reason: null }] });
+        }
+        this.textBuf = '';
+        this.inTextToolCall = false;
+      }
+
       if (this.seenToolCalls) {
         const finalCalls = this.flushToolCalls();
         if (finalCalls.length > 0) {
-          return [
+          result.push(
             { id, object: 'chat.completion.chunk', created, model: this.model,
               choices: [{ index: 0, delta: { tool_calls: finalCalls }, finish_reason: null }] },
             { id, object: 'chat.completion.chunk', created, model: this.model,
               choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
-          ];
+          );
+          return result;
         }
       }
       let finish = 'stop';
       try { finish = JSON.parse(data).finish_reason || 'stop'; } catch {}
-      return [{ id, object: 'chat.completion.chunk', created, model: this.model,
-        choices: [{ index: 0, delta: {}, finish_reason: finish }] }];
+      result.push({ id, object: 'chat.completion.chunk', created, model: this.model,
+        choices: [{ index: 0, delta: {}, finish_reason: finish }] });
+      return result;
     }
 
     // output 事件：累积 tool_calls，转发 content/reasoning
@@ -310,19 +336,68 @@ export class TraeEventNormalizer {
       try { parsed = JSON.parse(data); } catch { return []; }
       const chunks = [];
 
-      // content 文本（含文本工具调用检测）
+      // content 文本（含文本工具调用检测 + 分片累积）
       if (parsed.response) {
-        const text = parsed.response;
-        const tcResult = parseTextToolCalls(text);
-        if (tcResult) {
-          this.seenToolCalls = true;
-          this.accumulateToolCalls(tcResult.calls);
-          // 转发剥离工具调用标签后的剩余文本
-          if (tcResult.remainder) {
-            chunks.push({ id, object: 'chat.completion.chunk', created, model: this.model,
-              choices: [{ index: 0, delta: { content: tcResult.remainder }, finish_reason: null }] });
+        let text = parsed.response;
+
+        // 如果正在累积文本工具调用，继续缓冲
+        if (this.inTextToolCall) {
+          this.textBuf += text;
+          const fcEnd = this.textBuf.indexOf('<|FunctionCallEnd|>');
+          if (fcEnd >= 0) {
+            // 完整标签出现，解析并清空缓冲
+            const fullText = this.textBuf;
+            this.textBuf = '';
+            this.inTextToolCall = false;
+            const tcResult = parseTextToolCalls(fullText);
+            if (tcResult) {
+              this.seenToolCalls = true;
+              this.accumulateToolCalls(tcResult.calls);
+              if (tcResult.remainder) {
+                chunks.push({ id, object: 'chat.completion.chunk', created, model: this.model,
+                  choices: [{ index: 0, delta: { content: tcResult.remainder }, finish_reason: null }] });
+              }
+            } else {
+              // 解析失败，把累积内容当普通文本发出
+              chunks.push({ id, object: 'chat.completion.chunk', created, model: this.model,
+                choices: [{ index: 0, delta: { content: fullText }, finish_reason: null }] });
+            }
+          }
+          // FunctionCallEnd 还没出现，继续缓冲，不转发
+          return chunks;
+        }
+
+        // 非累积模式：检测 FunctionCallBegin
+        const fcBegin = text.indexOf('<|FunctionCallBegin|>');
+        if (fcBegin >= 0) {
+          const fcEnd = text.indexOf('<|FunctionCallEnd|>');
+          if (fcEnd >= 0) {
+            // 完整标签在同一个 chunk 里
+            const tcResult = parseTextToolCalls(text);
+            if (tcResult) {
+              this.seenToolCalls = true;
+              this.accumulateToolCalls(tcResult.calls);
+              if (tcResult.remainder) {
+                chunks.push({ id, object: 'chat.completion.chunk', created, model: this.model,
+                  choices: [{ index: 0, delta: { content: tcResult.remainder }, finish_reason: null }] });
+              }
+            } else {
+              chunks.push({ id, object: 'chat.completion.chunk', created, model: this.model,
+                choices: [{ index: 0, delta: { content: text }, finish_reason: null }] });
+            }
+          } else {
+            // FunctionCallBegin 出现但 FunctionCallEnd 还没出现 → 开始累积
+            this.inTextToolCall = true;
+            this.textBuf = text;
+            // FunctionCallBegin 之前的文本可以先发出
+            const before = text.substring(0, fcBegin).trim();
+            if (before) {
+              chunks.push({ id, object: 'chat.completion.chunk', created, model: this.model,
+                choices: [{ index: 0, delta: { content: before }, finish_reason: null }] });
+            }
           }
         } else {
+          // 没有工具调用标签，正常转发
           chunks.push({ id, object: 'chat.completion.chunk', created, model: this.model,
             choices: [{ index: 0, delta: { content: text }, finish_reason: null }] });
         }

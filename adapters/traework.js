@@ -244,10 +244,24 @@ export class TraeWorkAdapter {
       'X-Device-Id': crypto.createHash('sha256').update(machineId).digest('hex').slice(0, 32),
       'X-Machine-Id': machineId,
     };
+    // 注入行为引导：强制模型动手改代码，不只是给建议
+    const AGENTIC_INSTRUCTION = '\n\nIMPORTANT: You are an agentic coding assistant. When asked to modify code or fix bugs, you MUST use the Write or Edit tools to actually change the files. Do NOT just describe what to change - actually make the changes using tools. If you read a file and find a bug, fix it immediately with Edit. If you need to create a new file, use Write. Never respond with only suggestions when you have tools available to make changes.';
+
     const body = {
-      messages: (reqBody.messages || []).map((m) => {
+      messages: (reqBody.messages || []).map((m, idx) => {
         // developer → system（上游只接受 system/assistant/user/tool）
         const role = m.role === 'developer' ? 'system' : m.role;
+        try { fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log', `[${new Date().toISOString()}] msg[${idx}] role=${role} content=${typeof m.content === 'string' ? m.content.slice(0, 80) : typeof m.content}\n`); } catch {}
+        // 在第一条 system 消息末尾追加行为引导
+        if (role === 'system' && idx === 0) {
+          const content = typeof m.content === 'string'
+            ? m.content + AGENTIC_INSTRUCTION
+            : Array.isArray(m.content)
+              ? [...m.content, { type: 'text', text: AGENTIC_INSTRUCTION }]
+              : m.content;
+          try { fs.appendFileSync('C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log', `[${new Date().toISOString()}] INJECTED agentic instruction, sysLen: ${content.length}\n`); } catch {}
+          return { ...m, role, content };
+        }
         // tool 角色消息：content 转为数组格式（与参考实现对齐），保留 tool_call_id
         if (role === 'tool') {
           const out = { role, content: typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content };
