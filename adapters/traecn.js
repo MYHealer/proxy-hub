@@ -13,6 +13,23 @@ function logDebug(label, msg) {
 import { CredentialsCache } from '../credentials.js';
 import { postStreamingTraeSSE } from '../sse.js';
 import { needsTextTools, injectTools } from '../tool-compat.js';
+import https from 'node:https';
+
+function postJsonBuffer(url, headers, body, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const buf = Buffer.from(JSON.stringify(body));
+    const req = https.request(u, { method: 'POST', headers: { ...headers, 'Content-Length': buf.length } }, (res) => {
+      const data = [];
+      res.on('data', (c) => data.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(data).toString('utf8') }));
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('traecn timeout')));
+    req.write(buf);
+    req.end();
+  });
+}
 
 const UPSTREAM_BASE_CN = 'https://trae-api-cn.mchost.guru';
 const CHAT_ENDPOINTS = [
@@ -769,5 +786,37 @@ export class TraeCnAdapter {
       if (!isRetryable(lastErr)) break;
     }
     throw lastErr || new Error('Trae CN 所有上游端点均失败');
+  }
+
+  /** Trae 签到 API 通用调用 */
+  async _ugRequest(path) {
+    const { token } = await this.getAuth();
+    const url = `https://api.trae.cn${path}`;
+    const headers = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'User-Agent': `Trae/${IDE_VERSION}`,
+      Authorization: `Cloud-IDE-JWT ${token}`,
+      'X-User-Region': 'CN',
+    };
+    return postJsonBuffer(url, headers, {}, this.timeoutMs || 180000);
+  }
+
+  async checkinStatus() {
+    const res = await this._ugRequest('/trae/api/v2/ug/checkin_credits/status');
+    if (res.status >= 400) throw new Error(`checkinStatus ${res.status}: ${res.body.slice(0, 200)}`);
+    return JSON.parse(res.body);
+  }
+
+  async checkinClaim() {
+    const res = await this._ugRequest('/trae/api/v2/ug/checkin_credits/claim');
+    if (res.status >= 400) throw new Error(`checkinClaim ${res.status}: ${res.body.slice(0, 200)}`);
+    return JSON.parse(res.body);
+  }
+
+  async entUsage() {
+    const res = await this._ugRequest('/trae/api/v2/pay/ide_user_ent_usage');
+    if (res.status >= 400) throw new Error(`entUsage ${res.status}: ${res.body.slice(0, 200)}`);
+    return JSON.parse(res.body);
   }
 }

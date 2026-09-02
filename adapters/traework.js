@@ -443,6 +443,41 @@ export class TraeWorkAdapter {
     }
     throw lastErr || new Error('TraeWork 所有上游端点均失败');
   }
+
+  /** Trae 签到 API 通用调用 */
+  async _ugRequest(path) {
+    const { token } = await this.getAuth();
+    const url = `https://api.trae.cn${path}`;
+    const headers = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'User-Agent': `Trae/${IDE_VERSION}`,
+      Authorization: `Cloud-IDE-JWT ${token}`,
+      'X-User-Region': 'CN',
+    };
+    return postJsonBuffer(url, headers, {}, this.timeoutMs);
+  }
+
+  /** 查询签到状态 */
+  async checkinStatus() {
+    const res = await this._ugRequest('/trae/api/v2/ug/checkin_credits/status');
+    if (res.status >= 400) throw new Error(`checkinStatus ${res.status}: ${res.body.slice(0, 200)}`);
+    return JSON.parse(res.body);
+  }
+
+  /** 领取签到奖励 */
+  async checkinClaim() {
+    const res = await this._ugRequest('/trae/api/v2/ug/checkin_credits/claim');
+    if (res.status >= 400) throw new Error(`checkinClaim ${res.status}: ${res.body.slice(0, 200)}`);
+    return JSON.parse(res.body);
+  }
+
+  /** 查询剩余额度 */
+  async entUsage() {
+    const res = await this._ugRequest('/trae/api/v2/pay/ide_user_ent_usage');
+    if (res.status >= 400) throw new Error(`entUsage ${res.status}: ${res.body.slice(0, 200)}`);
+    return JSON.parse(res.body);
+  }
 }
 
 /** 标记认证失败的信号错误（用于触发一次自动刷新重试） */

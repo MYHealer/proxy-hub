@@ -8,6 +8,7 @@ import { CodeBuddyAdapter } from './adapters/codebuddy.js';
 import { TraeCnAdapter } from './adapters/traecn.js';
 import { TraeWorkAdapter } from './adapters/traework.js';
 import { QoderAdapter } from './adapters/qoder.js';
+import { startScheduler } from './scheduler.js';
 
 function sendJson(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -139,11 +140,14 @@ export function main() {
   const config = loadConfig();
   const registry = new Registry();
   const usage = new UsageTracker();
-  const handler = buildHandler({ config, registry, usage });
+  const adapters = registerAdapters(registry, config);
+  const handler = buildHandler({ config, registry, usage, adapters });
   const server = http.createServer(handler);
   server.timeout = config.timeoutMs;
   server.listen(config.port, '127.0.0.1', () => {
     console.log(`proxy-hub listening on http://127.0.0.1:${config.port}`);
+    // 启动定时签到 + Token 刷新
+    startScheduler(adapters);
   });
 }
 
