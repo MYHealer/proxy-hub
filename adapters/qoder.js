@@ -5,14 +5,33 @@ import fs from 'node:fs';
 
 const CN_HOME = path.join(os.homedir(), '.qoderworkcn');
 const OAUTH_USER = path.join(CN_HOME, '.auth-cn', 'user');
+
+// 自动检测 CLI 路径：优先 QODERCN_CLI 环境变量，然后尝试常见位置
+function findCli() {
+  if (process.env.QODERCN_CLI) return process.env.QODERCN_CLI;
+  const candidates = [
+    path.join(os.homedir(), '.qoder', 'bin', 'qodercli', 'qodercli.exe'),
+    'qodercli',
+    'qoderclicn',
+  ];
+  for (const c of candidates) {
+    try { if (c.includes('/') || c.includes('\\')) { if (fs.existsSync(c)) return c; } } catch {}
+  }
+  return candidates[candidates.length - 1]; // fallback
+}
+
 const MODELS = [
+  { externalId: 'qoder-qwen3.8-max', cliModel: 'Qwen3.8-Max' },
+  { externalId: 'qoder-qwen3.8-flash', cliModel: 'Qwen3.8-Flash' },
   { externalId: 'qoder-qwen3.7-max', cliModel: 'Qwen3.7-Max' },
-  { externalId: 'qoder-qwen3.6-plus', cliModel: 'Qwen3.6-Plus' },
-  { externalId: 'qoder-glm-5.2', cliModel: 'GLM-5.2' },
-  { externalId: 'qoder-glm-5.1', cliModel: 'GLM-5.1' },
-  { externalId: 'qoder-kimi-k2.6', cliModel: 'Kimi-K2.6' },
+  { externalId: 'qoder-qwen3.7-plus', cliModel: 'Qwen3.7-Plus' },
+  { externalId: 'qoder-glm-5.3', cliModel: 'GLM-5.3' },
+  { externalId: 'qoder-glm-5.3-flash', cliModel: 'GLM-5.3-Flash' },
+  { externalId: 'qoder-kimi-k3', cliModel: 'Kimi-K3' },
+  { externalId: 'qoder-kimi-k2.7-code', cliModel: 'Kimi-K2.7-Code' },
   { externalId: 'qoder-deepseek-v4-pro', cliModel: 'DeepSeek-V4-Pro' },
   { externalId: 'qoder-deepseek-v4-flash', cliModel: 'DeepSeek-V4-Flash' },
+  { externalId: 'qoder-minimax-m3', cliModel: 'MiniMax-M3' },
 ];
 
 /** 从 stream-json 单行解析出文本增量；非文本/无文本返回 null */
@@ -29,7 +48,7 @@ export function parseCliDelta(line) {
 export class QoderAdapter {
   constructor(options = {}) {
     this.id = 'qoder';
-    this.command = options.command || process.env.QODERCN_CLI || 'qoderclicn';
+    this.command = options.command || findCli();
     this.pat = options.pat ?? process.env.QODERCN_PERSONAL_ACCESS_TOKEN;
   }
 
