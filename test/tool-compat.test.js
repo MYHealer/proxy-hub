@@ -33,23 +33,23 @@ test('buildToolPrompt generates correct format', () => {
     type: 'function',
     function: {
       name: 'get_weather',
-      description: '获取天气信息',
+      description: 'Get weather information',
       parameters: {
         type: 'object',
         properties: {
-          city: { type: 'string', description: '城市名' },
-          unit: { type: 'string', description: '温度单位' },
+          city: { type: 'string', description: 'City name' },
+          unit: { type: 'string', description: 'Temperature unit' },
         },
         required: ['city'],
       },
     },
   }];
   const prompt = buildToolPrompt(tools);
-  assert.ok(prompt.includes('## 可用工具'));
-  assert.ok(prompt.includes('#### get_weather'));
-  assert.ok(prompt.includes('获取天气信息'));
-  assert.ok(prompt.includes('city (string, 必需): 城市名'));
-  assert.ok(prompt.includes('unit (string, 可选): 温度单位'));
+  assert.ok(prompt.includes('# Available Tools'));
+  assert.ok(prompt.includes('### get_weather'));
+  assert.ok(prompt.includes('Get weather information'));
+  assert.ok(prompt.includes('`city`'));
+  assert.ok(prompt.includes('`unit`'));
   assert.ok(prompt.includes('<tool_call>'));
   assert.ok(prompt.includes('</tool_call>'));
 });
@@ -74,7 +74,7 @@ test('injectTools adds tool prompt to system message', () => {
   assert.ok(!result.tools, 'tools should be removed');
   assert.ok(!result.tool_choice, 'tool_choice should be removed');
   assert.ok(result.messages[0].content.includes('You are helpful.'));
-  assert.ok(result.messages[0].content.includes('#### fn'));
+  assert.ok(result.messages[0].content.includes('### fn'));
 });
 
 test('injectTools creates system message if none exists', () => {
@@ -87,7 +87,7 @@ test('injectTools creates system message if none exists', () => {
   };
   const result = injectTools(body);
   assert.equal(result.messages[0].role, 'system');
-  assert.ok(result.messages[0].content.includes('#### fn'));
+  assert.ok(result.messages[0].content.includes('### fn'));
   assert.equal(result.messages[1].role, 'user');
 });
 
@@ -105,7 +105,7 @@ test('injectTools handles array content system message', () => {
   const sysContent = result.messages[0].content;
   assert.ok(Array.isArray(sysContent));
   assert.ok(sysContent.some((p) => p.text === 'sys'));
-  assert.ok(sysContent.some((p) => p.text.includes('#### fn')));
+  assert.ok(sysContent.some((p) => p.text.includes('### fn')));
 });
 
 test('injectTools does not modify original body', () => {

@@ -28,46 +28,54 @@ export function buildToolPrompt(tools) {
   if (!Array.isArray(tools) || tools.length === 0) return '';
 
   const lines = [
-    '## 可用工具',
+    '# Available Tools',
     '',
-    '如需调用工具，请严格按以下格式输出（不要在标签外添加任何其他内容）：',
+    'You have access to the following tools. When you need to use a tool, you MUST respond with a tool call in the exact format shown below. Do NOT describe what you would do - actually call the tool.',
     '',
+    '## Tool Call Format',
+    '',
+    'To call a tool, output ONLY the following JSON structure (no other text before or after):',
+    '',
+    '```json',
+    '{"name": "ToolName", "arguments": {"param1": "value1"}}',
+    '```',
+    '',
+    'Or use the function call format:',
     '<tool_call>',
-    '{"name": "tool_name", "arguments": {"arg1": "value1"}}',
+    '{"name": "ToolName", "arguments": {"param1": "value1"}}',
     '</tool_call>',
     '',
-    '也可以使用 DeepSeek 原生格式：',
-    '<|FunctionCallBegin|>[{"name":"tool_name","parameters":{"arg1":"value1"}}]<|FunctionCallEnd|>',
+    '## Important Rules',
+    '1. You MUST call tools when they are available and the user requests an action',
+    '2. Do NOT say "I cannot access files" - you HAVE tools to access files',
+    '3. Do NOT suggest the user run commands - use the tools directly',
+    '4. Always use the exact tool names listed below',
+    '5. Arguments must be valid JSON',
     '',
-    '### 工具列表',
+    '## Available Tools',
     '',
   ];
 
   for (const t of tools) {
     const fn = t.function || t;
     if (!fn.name) continue;
-    lines.push(`#### ${fn.name}`);
-    if (fn.description) lines.push(`描述：${fn.description}`);
+    lines.push(`### ${fn.name}`);
+    if (fn.description) lines.push(fn.description);
 
     const params = fn.parameters;
     if (params && params.properties) {
-      lines.push('参数：');
+      lines.push('');
+      lines.push('**Parameters:**');
       const required = new Set(params.required || []);
       for (const [name, schema] of Object.entries(params.properties)) {
         const type = schema.type || 'any';
         const desc = schema.description || '';
-        const req = required.has(name) ? '必需' : '可选';
-        lines.push(`- ${name} (${type}, ${req}): ${desc}`);
+        const req = required.has(name) ? '(required)' : '(optional)';
+        lines.push(`- \`${name}\` ${req}: ${desc}`);
       }
     }
     lines.push('');
   }
-
-  lines.push('## 规则');
-  lines.push('1. 每次只调用一个工具');
-  lines.push('2. arguments 必须是合法 JSON');
-  lines.push('3. 不要在工具调用标签外添加其他文本');
-  lines.push('');
 
   return lines.join('\n');
 }
