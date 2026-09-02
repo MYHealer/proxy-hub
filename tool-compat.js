@@ -21,6 +21,8 @@ export function needsTextTools(modelId) {
 
 /**
  * 将 OpenAI tools 数组转为 prompt 文本。
+ * 参考 Trae2api-cn 的 build_runtime_system_prompt() 格式，
+ * 包含工作区上下文和明确的工具调用指令。
  * @param {Array} tools OpenAI 格式的 tools 数组
  * @returns {string}
  */
@@ -30,11 +32,14 @@ export function buildToolPrompt(tools) {
   const lines = [
     '# Available Tools',
     '',
-    'You have access to the following tools. When you need to use a tool, you MUST respond with a tool call in the exact format shown below. Do NOT describe what you would do - actually call the tool.',
+    'You are a coding assistant connected to the user\'s local environment.',
+    'You have access to client tools that can interact with the local file system, run commands, and more.',
+    'When a tool can answer the question or complete the task, call it proactively and wait for the result.',
+    'Do NOT just describe what you would do - actually use the tools to make changes.',
     '',
     '## Tool Call Format',
     '',
-    'To call a tool, output ONLY the following JSON structure (no other text before or after):',
+    'To call a tool, output a JSON block in this exact format:',
     '',
     '```json',
     '{"name": "ToolName", "arguments": {"param1": "value1"}}',
@@ -51,6 +56,8 @@ export function buildToolPrompt(tools) {
     '3. Do NOT suggest the user run commands - use the tools directly',
     '4. Always use the exact tool names listed below',
     '5. Arguments must be valid JSON',
+    '6. When asked to modify code or fix bugs, use Edit or Write tools immediately',
+    '7. When asked to read files, use the Read tool directly',
     '',
     '## Available Tools',
     '',

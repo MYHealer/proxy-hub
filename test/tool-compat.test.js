@@ -52,6 +52,8 @@ test('buildToolPrompt generates correct format', () => {
   assert.ok(prompt.includes('`unit`'));
   assert.ok(prompt.includes('<tool_call>'));
   assert.ok(prompt.includes('</tool_call>'));
+  assert.ok(prompt.includes('coding assistant connected to the user\'s local environment'));
+  assert.ok(prompt.includes('call it proactively'));
 });
 
 test('buildToolPrompt returns empty for empty tools', () => {
