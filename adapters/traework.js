@@ -286,65 +286,92 @@ export class TraeWorkAdapter {
   }
 
   /**
-   * 自动压缩对话历史：token 预算制，从最新消息往前累积
-   * 防止上游因上下文窗口限制而截断导致模型"失忆"
+   * 自动压缩对话历史：token 预算制，分层保留策略
+   *
+   * 优先级：user 消息（指令/代码）> assistant 消息（可压缩）> tool 消息（可丢弃）
+   * 策略：
+   *   1. system 始终保留
+   *   2. user 消息全部保留（截断超长的），因为它们包含任务指令
+   *   3. 从最新 assistant/tool 往前填充剩余预算
+   *   4. 被丢弃的 assistant 消息摘要化保留在 marker 中
    */
   _compressMessages(messages, maxTurns = 15) {
     if (!Array.isArray(messages) || messages.length === 0) return messages;
 
-    // Token 预算（DeepSeek 上下文 64K~128K，留 ~30K 给消息）
     const TOKEN_BUDGET = 30000;
-    // 单条消息最大允许 token（超长则截断）
     const MAX_SINGLE_MSG = 8000;
 
     const systemMsgs = messages.filter(m => m.role === 'system');
     const dialogMsgs = messages.filter(m => m.role !== 'system');
 
-    // 计算 system 消息的 token 占用（始终保留）
     const systemTokens = systemMsgs.reduce((s, m) => s + this._msgTokens(m), 0);
-    let remaining = TOKEN_BUDGET - systemTokens;
+    let budget = TOKEN_BUDGET - systemTokens;
 
-    // 也做消息数量上限保护
-    const maxMsgs = maxTurns * 2;
-
-    // 从最新消息往前累积
-    const kept = [];
-    let usedTokens = 0;
-    for (let i = dialogMsgs.length - 1; i >= 0; i--) {
-      if (kept.length >= maxMsgs) break;
-      const msg = dialogMsgs[i];
+    // ── Pass 1: 处理 user 消息（全部保留，截断超长的）──
+    const userMsgs = [];
+    let userTokens = 0;
+    for (const msg of dialogMsgs) {
+      if (msg.role !== 'user') continue;
       const tok = this._msgTokens(msg);
-
       if (tok > MAX_SINGLE_MSG) {
-        // 单条过长：截断内容
         const truncated = this._truncateMsgContent(msg, MAX_SINGLE_MSG);
-        const truncTok = this._msgTokens(truncated);
-        if (usedTokens + truncTok > remaining) break;
-        kept.unshift(truncated);
-        usedTokens += truncTok;
-        continue;
+        userMsgs.push(truncated);
+        userTokens += this._msgTokens(truncated);
+      } else {
+        userMsgs.push(msg);
+        userTokens += tok;
       }
-
-      if (usedTokens + tok > remaining) break;
-      kept.unshift(msg);
-      usedTokens += tok;
     }
 
-    const dropped = dialogMsgs.length - kept.length;
+    // ── Pass 2: 从最新非 user 消息往前填充剩余预算 ──
+    const nonUserMsgs = dialogMsgs.filter(m => m.role !== 'user');
+    const keptNonUser = [];
+    let nonUserTokens = 0;
+    const remaining = budget - userTokens;
 
-    if (dropped > 0) {
-      // 注入上下文压缩标记
-      const marker = { role: 'user', content: `[Earlier ${dropped} messages compressed to fit context window]` };
-      const result = [...systemMsgs, marker, ...kept];
-      dbg(`[compress] token-budget: system=${systemTokens} dialog=${usedTokens}/${TOKEN_BUDGET} dropped=${dropped} kept=${kept.length}/${dialogMsgs.length}`);
+    for (let i = nonUserMsgs.length - 1; i >= 0; i--) {
+      const msg = nonUserMsgs[i];
+      const tok = this._msgTokens(msg);
+      if (tok > MAX_SINGLE_MSG) {
+        const truncated = this._truncateMsgContent(msg, MAX_SINGLE_MSG);
+        const truncTok = this._msgTokens(truncated);
+        if (nonUserTokens + truncTok > remaining) break;
+        keptNonUser.unshift(truncated);
+        nonUserTokens += truncTok;
+      } else {
+        if (nonUserTokens + tok > remaining) break;
+        keptNonUser.unshift(msg);
+        nonUserTokens += tok;
+      }
+    }
+
+    const droppedNonUser = nonUserMsgs.length - keptNonUser.length;
+
+    // ── Pass 3: 合并并按原始顺序排列 ──
+    const keptSet = new Set([...userMsgs, ...keptNonUser]);
+    const ordered = dialogMsgs.filter(m => keptSet.has(m));
+
+    if (droppedNonUser > 0) {
+      // 对被丢弃的 assistant 消息生成摘要
+      const droppedAssistants = nonUserMsgs.filter(m => !keptNonUser.includes(m) && m.role === 'assistant');
+      const summaries = droppedAssistants
+        .map(m => {
+          const text = typeof m.content === 'string' ? m.content : '';
+          return text.slice(0, 100).replace(/\n/g, ' ');
+        })
+        .filter(Boolean);
+
+      const markerText = summaries.length > 0
+        ? `[Earlier ${droppedNonUser} messages compressed. Key context: ${summaries.slice(-3).join(' | ')}]`
+        : `[Earlier ${droppedNonUser} messages compressed to fit context window]`;
+
+      const marker = { role: 'user', content: markerText };
+      const result = [...systemMsgs, marker, ...ordered];
+      dbg(`[compress] user=${userTokens} nonUser=${nonUserTokens}/${TOKEN_BUDGET} dropped=${droppedNonUser} kept-user=${userMsgs.length} kept-other=${keptNonUser.length}`);
       return result;
     }
 
-    // 没有丢弃消息，但可能有单条截断
-    if (kept.some((m, i) => m !== dialogMsgs[i])) {
-      dbg(`[compress] truncated oversized messages, kept all ${kept.length} messages`);
-    }
-    return [...systemMsgs, ...kept];
+    return [...systemMsgs, ...ordered];
   }
 
   /** 截断单条消息内容到指定 token 预算 */
