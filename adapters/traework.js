@@ -262,23 +262,17 @@ export class TraeWorkAdapter {
   async chat(reqBody, emit) {
     const { token, userId } = await this.getAuth();
     const machineId = crypto.randomBytes(16).toString('hex');
-    // 注入行为引导：强制模型动手改代码，不只是给建议
-    const AGENTIC_INSTRUCTION = '\n\nIMPORTANT: You are an agentic coding assistant. When asked to modify code or fix bugs, you MUST use the Write or Edit tools to actually change the files. Do NOT just describe what to change - actually make the changes using tools. If you read a file and find a bug, fix it immediately with Edit. If you need to create a new file, use Write. Never respond with only suggestions when you have tools available to make changes.';
 
     const body = {
       messages: (reqBody.messages || []).map((m, idx) => {
         // developer → system（上游只接受 system/assistant/user/tool）
         const role = m.role === 'developer' ? 'system' : m.role;
         dbg(`msg[${idx}] role=${role} content=${typeof m.content === 'string' ? m.content.slice(0, 80) : typeof m.content}`);
-        // 在第一条 system 消息末尾追加行为引导
-        if (role === 'system' && idx === 0) {
-          const origContent = typeof m.content === 'string'
-            ? m.content
-            : Array.isArray(m.content)
-              ? m.content.map(p => typeof p === 'string' ? p : (p.text || '')).join('')
-              : String(m.content || '');
-          const content = [{ type: 'text', text: origContent + AGENTIC_INSTRUCTION }];
-          dbg(`INJECTED agentic instruction, content array len: ${content.length}`);
+        // system 消息：转为数组格式，不注入额外内容（与 Go 参考对齐）
+        if (role === 'system') {
+          const content = typeof m.content === 'string'
+            ? [{ type: 'text', text: m.content }]
+            : Array.isArray(m.content) ? m.content : [{ type: 'text', text: String(m.content || '') }];
           return { ...m, role, content };
         }
         // tool 角色消息：content 转为数组格式（与参考实现对齐），保留 tool_call_id
