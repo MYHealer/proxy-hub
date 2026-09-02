@@ -286,7 +286,7 @@ export class TraeWorkAdapter {
   }
 
   /**
-   * 自动压缩对话历史：token 预算制，分层保留策略
+   * 自动压缩对话历史：token 预算制 + 两级 nudge 提示
    *
    * 优先级：user 消息（指令/代码）> assistant 消息（可压缩）> tool 消息（可丢弃）
    * 策略：
@@ -294,43 +294,46 @@ export class TraeWorkAdapter {
    *   2. user 消息全部保留（截断超长的），因为它们包含任务指令
    *   3. 从最新 assistant/tool 往前填充剩余预算
    *   4. 被丢弃的 assistant 消息摘要化保留在 marker 中
+   *   5. 根据 token 使用比例注入 nudge 提示到 system prompt
    */
   _compressMessages(messages, maxTurns = 15) {
     if (!Array.isArray(messages) || messages.length === 0) return messages;
 
     const TOKEN_BUDGET = 30000;
     const MAX_SINGLE_MSG = 8000;
+    // Nudge 阈值（借鉴 billion-context 的两级机制）
+    const NUDGE_GENTLE = 0.65;   // 65% — 提醒精简
+    const NUDGE_EMERGENCY = 0.85; // 85% — 强制精简
 
     const systemMsgs = messages.filter(m => m.role === 'system');
-    const dialogMsgs = messages.filter(m => m.role !== 'system');
+    const dialogMsgs = messages.filter(m => m.role !== 'user' && m.role !== 'system');
+    const userMsgs = messages.filter(m => m.role === 'user');
 
     const systemTokens = systemMsgs.reduce((s, m) => s + this._msgTokens(m), 0);
     let budget = TOKEN_BUDGET - systemTokens;
 
-    // ── Pass 1: 处理 user 消息（全部保留，截断超长的）──
-    const userMsgs = [];
+    // ── Pass 1: user 消息全部保留，截断超长的 ──
+    const keptUser = [];
     let userTokens = 0;
-    for (const msg of dialogMsgs) {
-      if (msg.role !== 'user') continue;
+    for (const msg of userMsgs) {
       const tok = this._msgTokens(msg);
       if (tok > MAX_SINGLE_MSG) {
         const truncated = this._truncateMsgContent(msg, MAX_SINGLE_MSG);
-        userMsgs.push(truncated);
+        keptUser.push(truncated);
         userTokens += this._msgTokens(truncated);
       } else {
-        userMsgs.push(msg);
+        keptUser.push(msg);
         userTokens += tok;
       }
     }
 
     // ── Pass 2: 从最新非 user 消息往前填充剩余预算 ──
-    const nonUserMsgs = dialogMsgs.filter(m => m.role !== 'user');
     const keptNonUser = [];
     let nonUserTokens = 0;
     const remaining = budget - userTokens;
 
-    for (let i = nonUserMsgs.length - 1; i >= 0; i--) {
-      const msg = nonUserMsgs[i];
+    for (let i = dialogMsgs.length - 1; i >= 0; i--) {
+      const msg = dialogMsgs[i];
       const tok = this._msgTokens(msg);
       if (tok > MAX_SINGLE_MSG) {
         const truncated = this._truncateMsgContent(msg, MAX_SINGLE_MSG);
@@ -345,15 +348,22 @@ export class TraeWorkAdapter {
       }
     }
 
-    const droppedNonUser = nonUserMsgs.length - keptNonUser.length;
+    const droppedNonUser = dialogMsgs.length - keptNonUser.length;
 
     // ── Pass 3: 合并并按原始顺序排列 ──
-    const keptSet = new Set([...userMsgs, ...keptNonUser]);
-    const ordered = dialogMsgs.filter(m => keptSet.has(m));
+    const keptSet = new Set([...keptUser, ...keptNonUser]);
+    const ordered = messages.filter(m => m.role === 'system' || keptSet.has(m));
 
-    if (droppedNonUser > 0) {
+    // ── Pass 4: 计算使用比例，决定 nudge 级别 ──
+    const totalUsed = systemTokens + userTokens + nonUserTokens;
+    const usageRatio = totalUsed / TOKEN_BUDGET;
+    let nudgeLevel = 'none';
+    if (usageRatio >= NUDGE_EMERGENCY) nudgeLevel = 'emergency';
+    else if (usageRatio >= NUDGE_GENTLE) nudgeLevel = 'gentle';
+
+    if (droppedNonUser > 0 || nudgeLevel !== 'none') {
       // 对被丢弃的 assistant 消息生成摘要
-      const droppedAssistants = nonUserMsgs.filter(m => !keptNonUser.includes(m) && m.role === 'assistant');
+      const droppedAssistants = dialogMsgs.filter(m => !keptNonUser.includes(m) && m.role === 'assistant');
       const summaries = droppedAssistants
         .map(m => {
           const text = typeof m.content === 'string' ? m.content : '';
@@ -363,15 +373,71 @@ export class TraeWorkAdapter {
 
       const markerText = summaries.length > 0
         ? `[Earlier ${droppedNonUser} messages compressed. Key context: ${summaries.slice(-3).join(' | ')}]`
-        : `[Earlier ${droppedNonUser} messages compressed to fit context window]`;
+        : droppedNonUser > 0
+          ? `[Earlier ${droppedNonUser} messages compressed to fit context window]`
+          : '';
 
-      const marker = { role: 'user', content: markerText };
-      const result = [...systemMsgs, marker, ...ordered];
-      dbg(`[compress] user=${userTokens} nonUser=${nonUserTokens}/${TOKEN_BUDGET} dropped=${droppedNonUser} kept-user=${userMsgs.length} kept-other=${keptNonUser.length}`);
+      // 注入 nudge 到 system prompt
+      const result = this._injectNudge(ordered, nudgeLevel, usageRatio);
+
+      if (markerText) {
+        const marker = { role: 'user', content: markerText };
+        // marker 插在第一个非 system 消息之前
+        const firstNonSystem = result.findIndex(m => m.role !== 'system');
+        result.splice(firstNonSystem >= 0 ? firstNonSystem : result.length, 0, marker);
+      }
+
+      dbg(`[compress] ratio=${(usageRatio * 100).toFixed(0)}% nudge=${nudgeLevel} user=${userTokens} nonUser=${nonUserTokens}/${TOKEN_BUDGET} dropped=${droppedNonUser}`);
       return result;
     }
 
-    return [...systemMsgs, ...ordered];
+    return ordered;
+  }
+
+  /** 向 system prompt 注入上下文压力提示 */
+  _injectNudge(messages, level, ratio) {
+    if (level === 'none') return messages;
+
+    const hints = {
+      gentle: [
+        '[Context Notice] You are working in a long conversation. To maintain quality:',
+        '- Be concise. Do not repeat code already shown or discussed.',
+        '- Summarize prior work briefly before continuing. Do not re-read files unnecessarily.',
+        '- Prefer short, targeted responses over verbose explanations.',
+      ].join('\n'),
+      emergency: [
+        '[Context Warning] Context window is running low. CRITICAL:',
+        '- Do NOT repeat any code, file content, or prior discussion. Reference by path:line only.',
+        '- Start each response with a 2-3 line summary of current task state.',
+        '- Keep responses minimal. If a file was already read, assume you have its content.',
+        '- Avoid re-running tools whose results you already have.',
+        '- If a task requires more context than available, state what you need concisely.',
+      ].join('\n'),
+    };
+
+    const hint = hints[level];
+    if (!hint) return messages;
+
+    const result = [...messages];
+    // 找到最后一个 system 消息，追加 nudge（避免创建新 system 消息触发上游限制）
+    let lastSystemIdx = -1;
+    for (let i = result.length - 1; i >= 0; i--) {
+      if (result[i].role === 'system') { lastSystemIdx = i; break; }
+    }
+
+    if (lastSystemIdx >= 0) {
+      const sys = result[lastSystemIdx];
+      if (typeof sys.content === 'string') {
+        result[lastSystemIdx] = { ...sys, content: sys.content + '\n\n' + hint };
+      } else if (Array.isArray(sys.content)) {
+        result[lastSystemIdx] = { ...sys, content: [...sys.content, { type: 'text', text: '\n\n' + hint }] };
+      }
+    } else {
+      // 没有 system 消息，创建一个
+      result.unshift({ role: 'system', content: hint });
+    }
+
+    return result;
   }
 
   /** 截断单条消息内容到指定 token 预算 */
