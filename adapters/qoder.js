@@ -103,6 +103,8 @@ export class QoderAdapter {
     const system = (reqBody.messages || []).find((m) => m.role === 'system')?.content || '';
     const userMsg = formatMessages(reqBody.messages);
 
+    // 参考 avaritiachaos/ColaFatty: 不把 prompt 放命令行参数（Windows 8K/32K 上限）
+    // 改用 stdin 传入，无长度限制
     const args = [
       '--print',
       '--output-format', 'stream-json',
@@ -111,11 +113,14 @@ export class QoderAdapter {
       '--no-session-persistence',
       '--max-model-request-retries', '0',
       ...(system ? ['--append-system-prompt', system] : []),
-      '--',
-      String(userMsg),
     ];
 
-    const env = { ...process.env };
+    const env = {
+      ...process.env,
+      // 参考 foxy1402: 跳过 TUI/浏览器特性，减少开销
+      CI: '1',
+      NO_BROWSER: '1',
+    };
     if (this.pat && !fs.existsSync(OAUTH_USER)) env.QODERCN_PERSONAL_ACCESS_TOKEN = this.pat;
 
     const created = Math.floor(Date.now() / 1000);
@@ -124,7 +129,7 @@ export class QoderAdapter {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) await sleep(1000 * attempt);
       try {
-        await this._runStream(model, args, env, created, emit);
+        await this._runStream(model, args, env, created, emit, userMsg);
         return;
       } catch (e) {
         lastErr = e;
@@ -134,7 +139,7 @@ export class QoderAdapter {
     throw lastErr || new Error('qoder upstream failed');
   }
 
-  _runStream(model, args, env, created, emit) {
+  _runStream(model, args, env, created, emit, prompt) {
     return new Promise((resolve, reject) => {
       const child = spawn(this.command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
       let lineBuffer = '';
@@ -227,6 +232,8 @@ export class QoderAdapter {
         resolve();
       });
 
+      // 通过 stdin 传入 prompt（避免 Windows 命令行长度限制）
+      child.stdin.write(prompt || '');
       child.stdin.end();
     });
   }
