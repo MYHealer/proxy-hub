@@ -4,9 +4,10 @@ import https from 'node:https';
 import { CredentialsCache } from '../credentials.js';
 import { decryptTc, traeStoragePath, normalizeTraeEvent, TraeEventNormalizer } from './traecn.js';
 import { postStreamingTraeSSE } from '../sse.js';
+import { injectTools } from '../tool-compat.js';
 
 const LOG_PATH = 'C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log';
-const _debugEnabled = true;
+const _debugEnabled = (() => { const v = process.env.PROXY_HUB_DEBUG; return v === '1' || v === 'true' || v === 'traework'; })();
 function dbg(msg) { if (_debugEnabled) try { fs.appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${msg}\n`); } catch {} }
 
 // TraeWork 桌面版（即 TRAE SOLO 升级版）适配器。
@@ -74,6 +75,7 @@ function extractUserInput(messages) {
 function isRetryable(err) {
   const m = err?.message || '';
   if (m.includes('timeout') || m.includes('ECONNRESET') || m.includes('ETIMEDOUT')) return true;
+  if (m.includes('SSL') || m.includes('ssl') || m.includes('alert') || m.includes('bad record mac')) return true;
   for (const code of RETRYABLE) {
     if (m.includes(`upstream ${code}`)) return true;
   }
@@ -81,6 +83,40 @@ function isRetryable(err) {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/**
+ * 回退到不支持 native tools 的端点时，清洗消息体：
+ * 1. 用 injectTools() 将 tools 注入为 system prompt 文本
+ * 2. assistant 消息带 tool_calls → 合并为纯文本 content
+ * 3. tool 消息 → 转为 user 消息（附加工具名提示）
+ */
+function sanitizeForFallback(body) {
+  const out = injectTools(body);
+  out.messages = out.messages.map(m => {
+    if (m.role === 'assistant' && m.tool_calls) {
+      // assistant + tool_calls → 将调用意图转为文本
+      const texts = [];
+      if (m.content) {
+        const c = typeof m.content === 'string' ? m.content
+          : Array.isArray(m.content) ? m.content.map(p => p.text || '').join('') : '';
+        if (c) texts.push(c);
+      }
+      for (const tc of m.tool_calls) {
+        const fn = tc.function_call || tc.function;
+        if (fn?.name) texts.push(`[Called tool: ${fn.name}(${fn.arguments || '{}'})]`);
+      }
+      return { role: 'assistant', content: [{ type: 'text', text: texts.join('\n') }] };
+    }
+    if (m.role === 'tool') {
+      // tool 结果 → user 消息
+      const c = typeof m.content === 'string' ? m.content
+        : Array.isArray(m.content) ? m.content.map(p => p.text || '').join('') : String(m.content || '');
+      return { role: 'user', content: [{ type: 'text', text: `[Tool result]\n${c}` }] };
+    }
+    return m;
+  });
+  return out;
+}
 
 /** 读取 TraeWork/SOLO CN 本地凭据（与 Trae CN 相同的 tc 解密），返回 { token, refreshToken, userId } */
 function readStorageAuth(storageFile, authKey) {
@@ -284,15 +320,13 @@ export class TraeWorkAdapter {
       stream: true,
       request_id: crypto.randomUUID(),
     };
-    // 与参考实现对齐：每次请求随机 session_id，上游靠 messages 数组维持上下文
-    body.session_id = '6a' + crypto.randomBytes(11).toString('hex').slice(0, 21);
-    body.conversation_id = '6a' + crypto.randomBytes(11).toString('hex').slice(0, 21);
+    // 与 Go 参考实现对齐：不设置 session_id/conversation_id，上游靠 messages 数组维持上下文
     body.user_input = extractUserInput(reqBody.messages);
     body.access_type = 1;
     body.metadata = { is_remote_req: false };
     body.request_seq = 1;
     if (reqBody.max_tokens) body.max_tokens = reqBody.max_tokens;
-    // 创建 headers（引用 body.session_id）
+    // 创建 headers（与 Go 参考 SOLOHeaders 对齐，不使用 Extra 头）
     const headers = {
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
@@ -302,8 +336,6 @@ export class TraeWorkAdapter {
       'X-Ide-Token': token,
       'X-Uid': userId || '',
       'X-App-Id': X_APP_ID,
-      'X-App-Version': 'default',
-      'X-App-Version-Code': IDE_VERSION_CODE,
       'X-Ide-Version': IDE_VERSION,
       'X-Ide-Version-Code': IDE_VERSION_CODE,
       'X-Ide-Version-Type': 'stable',
@@ -313,76 +345,7 @@ export class TraeWorkAdapter {
       'Request-Traffic-Type': 'prod',
       'X-Device-Id': crypto.createHash('sha256').update(machineId).digest('hex').slice(0, 32),
       'X-Machine-Id': machineId,
-      // Trae2api-cn 使用的 Extra 头，包含模型绑定元数据
-      'Extra': JSON.stringify({
-        agent_loop_id: body.session_id,
-        api_host: this.upstream,
-        config_name: normalizeModel(reqBody.model),
-        config_source: 1,
-        display_name: normalizeModel(reqBody.model),
-        model_name: `${normalizeModel(reqBody.model)}__v2`,
-        session_id: body.session_id,
-        user_prompt_submit_id: crypto.randomUUID(),
-      }),
     };
-    // few-shot 注入：新会话 + 有工具时，注入多个工具调用示例帮助模型学会格式
-    dbg(`few-shot check: tools=${reqBody.tools?.length ?? 0} msgs=${body.messages.length}`);
-    if (reqBody.tools?.length > 0 && body.messages.length <= 4) {
-      const examples = [
-        // 示例1: Read 工具
-        {
-          call: {
-            role: 'assistant',
-            content: null,
-            tool_calls: [{
-              index: 0, id: 'call_fewshot_001', type: 'function',
-              function_call: { name: 'Read', arguments: '{"file_path": "example.py"}' }
-            }]
-          },
-          resp: {
-            role: 'tool', tool_call_id: 'call_fewshot_001',
-            content: [{ type: 'text', text: 'print("hello world")' }]
-          }
-        },
-        // 示例2: Write 工具
-        {
-          call: {
-            role: 'assistant',
-            content: [{ type: 'text', text: 'I will create the file for you.' }],
-            tool_calls: [{
-              index: 0, id: 'call_fewshot_002', type: 'function',
-              function_call: { name: 'Write', arguments: '{"file_path": "output.py", "content": "x = 42\\nprint(x)"}' }
-            }]
-          },
-          resp: {
-            role: 'tool', tool_call_id: 'call_fewshot_002',
-            content: [{ type: 'text', text: 'File written successfully' }]
-          }
-        },
-        // 示例3: Bash 工具
-        {
-          call: {
-            role: 'assistant',
-            content: null,
-            tool_calls: [{
-              index: 0, id: 'call_fewshot_003', type: 'function',
-              function_call: { name: 'Bash', arguments: '{"command": "ls -la"}' }
-            }]
-          },
-          resp: {
-            role: 'tool', tool_call_id: 'call_fewshot_003',
-            content: [{ type: 'text', text: 'total 0\ndrwxr-xr-x  2 user staff  64 Jan  1 00:00 .\ndrwxr-xr-x  3 user staff  96 Jan  1 00:00 ..' }]
-          }
-        }
-      ];
-      // 在第一条用户消息后插入所有示例
-      const insertIdx = body.messages.findIndex(m => m.role === 'user');
-      if (insertIdx >= 0) {
-        const toInsert = examples.flatMap(e => [e.call, e.resp]);
-        body.messages.splice(insertIdx + 1, 0, ...toInsert);
-        dbg(`INJECTED ${examples.length} few-shot tool call examples`);
-      }
-    }
     // tools 处理：llm_utils_chat 支持原生 tools，不需要文本注入（双保险反而让模型混乱）。
     // 文本注入只给不支持 tools 的回退端点用（但当前端点列表都是先尝试 llm_utils_chat）。
     if (reqBody.tools?.length > 0) {
@@ -419,16 +382,14 @@ export class TraeWorkAdapter {
           else if (typ === 'auto' || typ === 'required') body.tool_choice = typ;
           else if (typ === 'function' && tc.function?.name) body.tool_choice = tc.function.name;
         }
-      } else {
-        // 参考实现：有 tools 时强制 required
-        body.tool_choice = 'required';
       }
+      // 与 Go 参考对齐：客户端未指定 tool_choice 时不添加（由上游决定）
     }
 
     const bodyStr = JSON.stringify(body);
     const _toolNames = (body.tools || []).slice(0, 5).map(t => t.function?.name || '?').join(',');
     const _toolTotal = body.tools?.length || 0;
-    console.error(`[traework] UPSTREAM: ${bodyStr.length}B, tools=${_toolTotal}(${_toolNames}...), function=${body.function}, msgs=${body.messages?.length}, sid=${body.session_id?.slice(0,10)}`);
+    console.error(`[traework] UPSTREAM: ${bodyStr.length}B, tools=${_toolTotal}(${_toolNames}...), function=${body.function}, msgs=${body.messages?.length}`);
     if (_debugEnabled) {
       const _tc = body.tool_choice ?? 'none';
       const _msgSummary = body.messages.map(m => {
@@ -441,6 +402,8 @@ export class TraeWorkAdapter {
       dbg(`UPSTREAM body: tool_choice=${_tc}, tools=${_toolTotal}, msgs=${body.messages?.length}, sysLen=${_sysLen}\n  flow: ${_msgSummary}`);
     }
     let lastErr = null;
+    // 标记是否已回退过（回退后需要清洗消息体）
+    let fallbackSanitized = false;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
         try { await this.refreshAuth(); const a = await this.getAuth(); headers.Authorization = `Cloud-IDE-JWT ${a.token}`; headers['X-Cloudide-Token'] = a.token; } catch {}
@@ -451,8 +414,15 @@ export class TraeWorkAdapter {
           const normalizer = new TraeEventNormalizer(reqBody.model);
           const responseBuffer = [];
           const bufferEmit = (chunk) => { responseBuffer.push(chunk); emit(chunk); };
+          // 回退到非 tools 端点时，清洗消息体（剥离 tool_calls/tool results，注入文本工具）
+          let curBodyStr = bodyStr;
+          if (fallbackSanitized) {
+            const sanitized = sanitizeForFallback(JSON.parse(bodyStr));
+            curBodyStr = JSON.stringify(sanitized);
+            dbg(`FALLBACK sanitized body: ${curBodyStr.length}B, msgs=${sanitized.messages?.length}`);
+          }
           dbg(`CALLING upstream ${ep}...`);
-          await postStreamingTraeSSE(`${this.upstream}${ep}`, headers, bodyStr, this.timeoutMs, reqBody.model, (ev, d, _m) => {
+          await postStreamingTraeSSE(`${this.upstream}${ep}`, headers, curBodyStr, this.timeoutMs, reqBody.model, (ev, d, _m) => {
             const chunks = normalizer.normalize(ev, d);
             dbg(`SSE event=${ev} dataLen=${d?.length ?? 0} chunks=${chunks.length}`);
             return chunks;
@@ -466,6 +436,8 @@ export class TraeWorkAdapter {
         } catch (e) {
           lastErr = e;
           dbg(`ENDPOINT FAILED ${ep}: ${e.message?.slice(0, 200)}`);
+          // llm_utils_chat 失败后，标记下次循环需要清洗
+          if (ep === CHAT_ENDPOINTS[0]) fallbackSanitized = true;
           if (e.message.includes('401') || e.message.includes('403')) {
             // 认证错误：刷新后重试整个端点列表
             try { await this.refreshAuth(); const a = await this.getAuth(); headers.Authorization = `Cloud-IDE-JWT ${a.token}`; headers['X-Cloudide-Token'] = a.token; } catch {}
