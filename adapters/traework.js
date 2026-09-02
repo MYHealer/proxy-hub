@@ -6,7 +6,7 @@ import { decryptTc, traeStoragePath, normalizeTraeEvent, TraeEventNormalizer } f
 import { postStreamingTraeSSE } from '../sse.js';
 
 const LOG_PATH = 'C:/Users/MR/Desktop/mix_api_bridge_src/proxy-hub/debug.log';
-const _debugEnabled = (() => { const v = process.env.PROXY_HUB_DEBUG; return v === '1' || v === 'true' || v === 'traework'; })();
+const _debugEnabled = true;
 function dbg(msg) { if (_debugEnabled) try { fs.appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${msg}\n`); } catch {} }
 
 // TraeWork 桌面版（即 TRAE SOLO 升级版）适配器。
@@ -268,7 +268,7 @@ export class TraeWorkAdapter {
               };
             })
             .filter(Boolean);
-          const out = { role, content: m.content ?? null };
+          const out = { role, content: m.content == null ? null : (typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content) };
           if (tcs.length > 0) out.tool_calls = tcs;
           return out;
         }
