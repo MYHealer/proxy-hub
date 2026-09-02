@@ -684,7 +684,7 @@ export class TraeCnAdapter {
               };
             })
             .filter(Boolean);
-          const out = { role, content: m.content ?? null };
+          const out = { role, content: m.content == null ? null : (typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content) };
           if (tcs.length > 0) out.tool_calls = tcs;
           return out;
         }
@@ -698,7 +698,6 @@ export class TraeCnAdapter {
       function: 'chat_v3',
       stream: true,
       request_id: crypto.randomUUID(),
-      session_id: crypto.randomUUID(),
     };
     if (reqBody.max_tokens) body.max_tokens = reqBody.max_tokens;
     // tools 处理：不支持原生 function calling 的模型走文本注入
@@ -740,10 +739,8 @@ export class TraeCnAdapter {
           else if (typ === 'auto' || typ === 'required') body.tool_choice = typ;
           else if (typ === 'function' && tc.function?.name) body.tool_choice = tc.function.name;
         }
-      } else {
-        // 客户端未指定 → auto，让模型自由选择文本/工具（不可用 required，会诱导空参数调用）
-        body.tool_choice = 'auto';
       }
+      // 客户端未指定 tool_choice 时不添加（与 Go 参考对齐）
     }
 
     const bodyStr = JSON.stringify(body);
