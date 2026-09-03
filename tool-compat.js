@@ -116,3 +116,65 @@ export function injectTools(body) {
   delete out.tool_choice;
   return out;
 }
+
+/**
+ * Qoder 专用：更强制的 tool prompt（参考 foxy1402/qoder-proxy）。
+ * 要求模型在需要调用工具时，只输出纯 JSON，不带任何解释文本。
+ * @param {Array} tools OpenAI 格式的 tools 数组
+ * @returns {string}
+ */
+export function buildQoderToolPrompt(tools) {
+  if (!Array.isArray(tools) || tools.length === 0) return '';
+
+  const defs = tools
+    .filter((t) => t.type === 'function' && t.function)
+    .map((t) => {
+      const fn = t.function;
+      const params = fn.parameters
+        ? JSON.stringify(fn.parameters, null, 2)
+        : '{}';
+      return `Function: ${fn.name}\nDescription: ${fn.description || 'No description'}\nParameters (JSON Schema): ${params}`;
+    })
+    .join('\n\n');
+
+  return `You have access to the following functions. When you need to call a function, you MUST respond with ONLY a valid JSON object in this exact format and nothing else:
+
+{"tool_call":{"name":"<function_name>","arguments":<arguments_object>}}
+
+Do NOT include any explanation or text before or after the JSON when calling a tool. Only output the raw JSON object. Do NOT wrap it in markdown code fences.
+
+If you do not need to call a function, respond normally with plain text.
+
+Available functions:
+${defs}`;
+}
+
+/**
+ * Qoder 专用：将 tools 注入为 system prompt 文本（使用更强制的格式）。
+ * @param {object} body OpenAI 请求体
+ * @returns {object} 新的请求体
+ */
+export function injectQoderTools(body) {
+  const prompt = buildQoderToolPrompt(body.tools);
+  if (!prompt) return body;
+
+  const messages = [...(body.messages || [])];
+  const sysIdx = messages.findIndex((m) => m.role === 'system');
+
+  if (sysIdx >= 0) {
+    const sys = messages[sysIdx];
+    const content = typeof sys.content === 'string'
+      ? sys.content + '\n\n' + prompt
+      : Array.isArray(sys.content)
+        ? [...sys.content, { type: 'text', text: prompt }]
+        : prompt;
+    messages[sysIdx] = { ...sys, content };
+  } else {
+    messages.unshift({ role: 'system', content: prompt });
+  }
+
+  const out = { ...body, messages };
+  delete out.tools;
+  delete out.tool_choice;
+  return out;
+}
